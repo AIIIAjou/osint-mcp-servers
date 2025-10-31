@@ -4,11 +4,14 @@ import time
 import logging
 import asyncio
 import subprocess
+import base64
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from dotenv import load_dotenv
 from intelxapi import intelx
+from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,6 +75,16 @@ class SherlockSearchRequest(BaseModel):
     username: str = Field(..., description="검색할 사용자명")
     sites: Optional[List[str]] = Field(None, description="검색할 사이트 목록 (예: ['github', 'twitter'])")
     timeout: int = Field(120, description="타임아웃 (초, 기본값: 120초)")
+
+
+class PlaywrightAnalyzeRequest(BaseModel):
+    url: str = Field(..., description="분석할 URL")
+    extract_metadata: bool = Field(True, description="메타데이터 추출 (제목, 설명, 이미지)")
+    extract_text: bool = Field(True, description="페이지 텍스트 추출")
+    extract_links: bool = Field(True, description="링크 목록 추출")
+    screenshot: bool = Field(False, description="스크린샷 캡처")
+    wait_for_selector: Optional[str] = Field(None, description="특정 요소가 로드될 때까지 대기")
+    timeout: int = Field(30, description="타임아웃 (초)")
 
 
 class IntelligenceXClient:
@@ -170,10 +183,10 @@ class SherlockClient:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=search_request.timeout * len(search_request.sites or [100])  # 대충 100개 사이트
+                timeout=search_request.timeout * len(search_request.sites or [100])
             )
 
-            # 결과 파싱
+            # 결과 파싱 - [+] 패턴으로 찾은 계정 추출
             found_accounts = {}
             lines = result.stdout.split('\n')
 
@@ -212,11 +225,116 @@ class SherlockClient:
             )
 
 
+class PlaywrightClient:
+    def __init__(self):
+        self.debug_mode = DEBUG_MODE
+
+    async def analyze(self, analyze_request: PlaywrightAnalyzeRequest) -> Dict[str, Any]:
+        """Playwright로 URL 분석"""
+        if self.debug_mode:
+            logger.info(f"DEBUG MODE: Playwright Mock 데이터 반환 (URL: {analyze_request.url})")
+            return {
+                "url": analyze_request.url,
+                "metadata": {
+                    "title": "Mock Page Title",
+                    "description": "This is a mock page description",
+                    "image": "https://example.com/image.jpg"
+                },
+                "text": "Mock page content...",
+                "links": [
+                    {"text": "Link 1", "href": "https://example.com/link1"},
+                    {"text": "Link 2", "href": "https://example.com/link2"}
+                ],
+                "screenshot": None,
+                "status": "completed"
+            }
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch()
+                page = await browser.new_page()
+
+                # URL 접속
+                logger.info(f"Playwright 페이지 로드: {analyze_request.url}")
+                await page.goto(analyze_request.url, timeout=analyze_request.timeout * 1000, wait_until="load")
+
+                # 특정 요소 대기
+                if analyze_request.wait_for_selector:
+                    await page.wait_for_selector(analyze_request.wait_for_selector, timeout=5000)
+
+                result = {
+                    "url": analyze_request.url,
+                    "status": "completed"
+                }
+
+                # 메타데이터 추출
+                if analyze_request.extract_metadata:
+                    title = await page.title()
+
+                    # 메타 설명 추출 (타임아웃 1초)
+                    try:
+                        meta_description = await page.locator('meta[name="description"]').get_attribute("content", timeout=1000)
+                    except:
+                        meta_description = None
+
+                    # og:image 추출 (타임아웃 1초)
+                    try:
+                        meta_image = await page.locator('meta[property="og:image"]').get_attribute("content", timeout=1000)
+                    except:
+                        meta_image = None
+
+                    result["metadata"] = {
+                        "title": title,
+                        "description": meta_description or "",
+                        "image": meta_image or ""
+                    }
+
+                # 텍스트 추출
+                if analyze_request.extract_text:
+                    html = await page.content()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    # 스크립트와 스타일 제거
+                    for script in soup(["script", "style"]):
+                        script.decompose()
+                    text = soup.get_text(separator='\n', strip=True)
+                    # 텍스트 길이 제한 (너무 길면 API 응답이 커질 수 있음)
+                    result["text"] = text[:2000] if text else ""
+
+                # 링크 추출
+                if analyze_request.extract_links:
+                    html = await page.content()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    links = []
+                    for link in soup.find_all('a', href=True):
+                        links.append({
+                            "text": link.get_text(strip=True),
+                            "href": link['href']
+                        })
+                    result["links"] = links[:50]  # 최대 50개 링크
+
+                # 스크린샷
+                if analyze_request.screenshot:
+                    screenshot_bytes = await page.screenshot()
+                    result["screenshot"] = base64.b64encode(screenshot_bytes).decode('utf-8')
+
+                await browser.close()
+                return result
+
+        except Exception as e:
+            logger.error(f"Playwright 분석 실패: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"URL 분석 오류: {str(e)}"
+            )
+
+
 # Intelligence X 클라이언트 인스턴스
 intelx_client = IntelligenceXClient(INTELX_API_KEY)
 
 # Sherlock 클라이언트 인스턴스
 sherlock_client = SherlockClient()
+
+# Playwright 클라이언트 인스턴스
+playwright_client = PlaywrightClient()
 
 # MCP 도구 정의
 MCP_TOOLS = [
@@ -302,6 +420,49 @@ MCP_TOOLS = [
                 },
             },
             "required": ["username"],
+        },
+    },
+    {
+        "name": "analyze_url_playwright",
+        "description": "Playwright를 사용하여 URL을 분석합니다. 메타데이터, 텍스트 콘텐츠, 링크, 스크린샷 등을 추출할 수 있습니다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "분석할 URL (예: https://example.com)",
+                },
+                "extract_metadata": {
+                    "type": "boolean",
+                    "description": "메타데이터 추출 (제목, 설명, 이미지)",
+                    "default": True,
+                },
+                "extract_text": {
+                    "type": "boolean",
+                    "description": "페이지 텍스트 추출",
+                    "default": True,
+                },
+                "extract_links": {
+                    "type": "boolean",
+                    "description": "링크 목록 추출",
+                    "default": True,
+                },
+                "screenshot": {
+                    "type": "boolean",
+                    "description": "스크린샷 캡처 (Base64 인코딩)",
+                    "default": False,
+                },
+                "wait_for_selector": {
+                    "type": "string",
+                    "description": "특정 CSS 선택자가 로드될 때까지 대기 (선택사항)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "타임아웃 (초, 기본값: 30)",
+                    "default": 30,
+                },
+            },
+            "required": ["url"],
         },
     },
 ]
@@ -507,6 +668,104 @@ async def mcp_sherlock_endpoint(request: Request):
 
     except Exception as e:
         logger.error(f"Sherlock MCP 요청 처리 오류: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "jsonrpc": "2.0",
+                "id": body.get("id", 1) if "body" in locals() else 1,
+                "error": {"code": -32603, "message": str(e)},
+            },
+        )
+
+
+@app.post("/mcp/playwright")
+async def mcp_playwright_endpoint(request: Request):
+    """Playwright MCP 프로토콜 엔드포인트 (JSON-RPC 2.0)"""
+    try:
+        body = await request.json()
+        method = body.get("method")
+        params = body.get("params", {})
+        request_id = body.get("id", 1)
+
+        logger.info(f"Playwright MCP 요청: method={method}, id={request_id}")
+
+        # 초기화 메서드
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {
+                        "name": "Playwright MCP Server",
+                        "version": "1.0.0",
+                    },
+                },
+            }
+
+        # 알림 메서드 (응답 없음 - 단순히 로그만)
+        elif method == "notifications/initialized":
+            logger.info("Playwright 클라이언트 초기화 완료")
+            return {"jsonrpc": "2.0", "id": request_id}
+
+        # 도구 목록 반환 (JSON-RPC 2.0 형식)
+        elif method == "tools/list":
+            playwright_tools = [tool for tool in MCP_TOOLS if tool["name"] == "analyze_url_playwright"]
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": playwright_tools}}
+
+        # 도구 호출 (JSON-RPC 2.0 형식)
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+
+            if tool_name == "analyze_url_playwright":
+                playwright_req = PlaywrightAnalyzeRequest(
+                    url=arguments.get("url"),
+                    extract_metadata=arguments.get("extract_metadata", True),
+                    extract_text=arguments.get("extract_text", True),
+                    extract_links=arguments.get("extract_links", True),
+                    screenshot=arguments.get("screenshot", False),
+                    wait_for_selector=arguments.get("wait_for_selector"),
+                    timeout=arguments.get("timeout", 30),
+                )
+
+                result = await playwright_client.analyze(playwright_req)
+
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    result, indent=2, ensure_ascii=False
+                                ),
+                            }
+                        ]
+                    },
+                }
+
+            else:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"알 수 없는 도구: {tool_name}",
+                    },
+                }
+
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": f"지원하지 않는 메소드: {method}"},
+            }
+
+    except Exception as e:
+        logger.error(f"Playwright MCP 요청 처리 오류: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={

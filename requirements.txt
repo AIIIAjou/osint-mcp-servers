@@ -19,6 +19,10 @@ python-dotenv==1.2.1
 # Sherlock 사용자명 검색
 sherlock-project>=0.14.0
 
+# Playwright URL 분석 및 웹 크롤링
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+
 # 추가 의존성
 pydantic==2.12.3
 pydantic-settings==2.11.0
