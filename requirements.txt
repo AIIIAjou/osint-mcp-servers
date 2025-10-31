@@ -1,0 +1,17 @@
+# Intelligence X MCP Server 의존성
+
+# MCP SDK (stdio 버전용)
+mcp>=0.9.0
+
+# HTTP 서버 (HTTP 버전용)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# HTTP 클라이언트
+httpx>=0.27.0
+
+# 환경 변수 관리
+python-dotenv>=1.0.0
+
+# 비동기 지원
+asyncio>=3.4.3
