@@ -2,7 +2,7 @@
 .git
 .gitignore
 .gitattributes
-
+.claude
 # Python
 __pycache__
 *.py[cod]

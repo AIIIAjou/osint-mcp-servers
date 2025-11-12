@@ -2,6 +2,7 @@
 
 # MCP SDK
 mcp==1.19.0
+fastmcp>=0.1.0  # Unified fastmcp framework for tool registration
 
 # HTTP 서버
 fastapi==0.120.2

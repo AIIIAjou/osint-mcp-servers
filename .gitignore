@@ -2,7 +2,8 @@
 .env
 .env.local
 .env.*.local
-
+.claude
+.specify
 # Python
 __pycache__/
 *.py[cod]
