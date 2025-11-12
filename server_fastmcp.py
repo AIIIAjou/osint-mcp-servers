@@ -634,6 +634,22 @@ async def health():
     }
 
 
+@app.get("/mcp")
+async def mcp_root():
+    """MCP 기본 경로 안내"""
+    return {
+        "message": "이 MCP 서버는 POST 방식의 JSON-RPC 요청을 `/mcp`로 전송해 도구를 호출합니다.",
+        "example_request": {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "<tool_name>", "arguments": {}},
+        },
+        "available_tools": [tool["name"] for tool in MCP_TOOLS],
+        "documentation": "각 도구별 입력 스키마는 `tools/list` 응답을 참고하세요.",
+    }
+
+
 # ============================================================================
 # Phase 6: 기존 MCP 엔드포인트 (호환성 유지)
 # ============================================================================
