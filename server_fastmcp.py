@@ -101,6 +101,19 @@ class PlaywrightAnalyzeRequest(BaseModel):
     timeout: int = Field(30, description="타임아웃 (초)")
 
 
+class PlaywrightCrawlRequest(BaseModel):
+    url: str = Field(..., description="시작할 URL")
+    max_depth: int = Field(2, description="크롤링 깊이 (기본값: 2)")
+    max_pages: int = Field(10, description="최대 방문 페이지 수 (기본값: 10)")
+    url_pattern: Optional[str] = Field(
+        None, description="크롤링할 URL 패턴 (정규표현식, 예: .*github.com.*)"
+    )
+    extract_text: bool = Field(True, description="페이지 텍스트 추출")
+    extract_links: bool = Field(True, description="링크 추출")
+    analyze_content: bool = Field(True, description="지능형 콘텐츠 분석")
+    timeout: int = Field(60, description="전체 크롤링 타임아웃 (초)")
+
+
 class ThreatIntelRequest(BaseModel):
     query: str = Field(..., description="조회할 대상 (도메인 또는 IP)")
     query_type: str = Field("domain", description="조회 타입: domain 또는 ip")
@@ -242,10 +255,12 @@ class SherlockClient:
 
 
 class PlaywrightClient:
-    """Playwright URL 분석 클라이언트"""
+    """Playwright URL 분석 및 자동 크롤링 클라이언트"""
 
     def __init__(self):
         self.debug_mode = DEBUG_MODE
+        self.visited_urls = set()
+        self.crawl_results = []
 
     async def analyze(
         self, analyze_request: PlaywrightAnalyzeRequest
@@ -343,6 +358,414 @@ class PlaywrightClient:
         except Exception as e:
             logger.error(f"Playwright 분석 실패: {e}")
             raise HTTPException(status_code=500, detail=f"URL 분석 오류: {str(e)}")
+
+    def _analyze_content(self, html: str, text: str, url: str) -> Dict[str, Any]:
+        """페이지 콘텐츠의 지능형 분석"""
+        import re
+
+        analysis = {
+            "page_purpose": self._detect_page_purpose(text, html, url),
+            "key_information": self._extract_key_info(text, html),
+            "potential_risks": self._detect_risks(text, html, url),
+            "entities": self._extract_entities(text),
+            "keywords": self._extract_keywords(text),
+        }
+        return analysis
+
+    def _detect_page_purpose(self, text: str, html: str, url: str) -> str:
+        """페이지의 목적 파악"""
+        text_lower = text.lower()
+        url_lower = url.lower()
+
+        # 프로필 페이지 감지
+        if any(keyword in text_lower for keyword in ["profile", "about", "bio", "user"]) or \
+           any(keyword in url_lower for keyword in ["profile", "user", "about"]):
+            return "User/Profile Page"
+
+        # 로그인 페이지
+        if any(keyword in text_lower for keyword in ["login", "password", "username", "sign in"]):
+            return "Authentication/Login Page"
+
+        # 상거래 사이트
+        if any(keyword in text_lower for keyword in ["price", "buy", "purchase", "cart", "checkout", "product"]):
+            return "E-commerce/Shopping Page"
+
+        # 문서/블로그
+        if any(keyword in text_lower for keyword in ["article", "blog", "post", "author", "published"]):
+            return "Blog/Article Page"
+
+        # 검색 결과
+        if any(keyword in text_lower for keyword in ["search result", "found", "matches"]):
+            return "Search Results Page"
+
+        # API 페이지
+        if "api" in url_lower or any(keyword in text_lower for keyword in ["endpoint", "request", "response", "json"]):
+            return "API/Technical Documentation"
+
+        return "General Content Page"
+
+    def _extract_key_info(self, text: str, html: str) -> Dict[str, Any]:
+        """주요 정보 추출"""
+        import re
+
+        info = {}
+
+        # 이메일 추출
+        emails = set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text))
+        if emails:
+            info["emails"] = list(emails)[:5]  # 최대 5개
+
+        # 전화번호 추출 (간단한 패턴)
+        phones = set(re.findall(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', text))
+        if phones:
+            info["phone_numbers"] = list(phones)[:5]
+
+        # 소셜 미디어 링크 추출
+        social_patterns = {
+            "twitter": r'twitter\.com/[\w]+',
+            "github": r'github\.com/[\w-]+',
+            "linkedin": r'linkedin\.com/in/[\w-]+',
+            "instagram": r'instagram\.com/[\w.]+',
+            "facebook": r'facebook\.com/[\w.]+',
+        }
+
+        social_links = {}
+        for platform, pattern in social_patterns.items():
+            matches = re.findall(pattern, text)
+            if matches:
+                social_links[platform] = list(set(matches))[:3]
+
+        if social_links:
+            info["social_media"] = social_links
+
+        # HTML 메타데이터에서 추가 정보
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Open Graph 정보
+        og_title = soup.find("meta", property="og:title")
+        og_description = soup.find("meta", property="og:description")
+
+        if og_title:
+            info["og_title"] = og_title.get("content")
+        if og_description:
+            info["og_description"] = og_description.get("content")
+
+        # 조직명 추출 시도
+        author = soup.find("meta", {"name": "author"})
+        if author:
+            info["author"] = author.get("content")
+
+        return info
+
+    def _detect_risks(self, text: str, html: str, url: str) -> List[str]:
+        """잠재적 보안 위험 감지"""
+        risks = []
+        text_lower = text.lower()
+        url_lower = url.lower()
+
+        # 피싱 징후
+        if any(keyword in text_lower for keyword in ["verify account", "confirm identity", "update payment", "urgent action required"]):
+            risks.append("Potential phishing indicators")
+
+        # 인증 요구
+        if "password" in text_lower or "login" in text_lower:
+            risks.append("Authentication required - verify legitimacy")
+
+        # 의심 활동
+        if any(keyword in text_lower for keyword in ["limited time", "act now", "verify immediately", "confirm now"]):
+            risks.append("High-pressure/urgency language detected")
+
+        # 외부 스크립트 (XSS 가능성)
+        if "<script" in html and "src=" in html:
+            script_count = html.count("<script")
+            if script_count > 5:
+                risks.append(f"Multiple external scripts detected ({script_count})")
+
+        # HTTP vs HTTPS
+        if url_lower.startswith("http://") and any(keyword in text_lower for keyword in ["password", "payment", "card"]):
+            risks.append("Sensitive data handling over insecure HTTP")
+
+        # 숨겨진 폼
+        if "<form" in html and "style" in html.lower():
+            if "display:none" in html.lower() or "visibility:hidden" in html.lower():
+                risks.append("Hidden form elements detected")
+
+        return risks if risks else ["No obvious security risks detected"]
+
+    def _extract_entities(self, text: str) -> Dict[str, List[str]]:
+        """텍스트에서 엔티티 추출 (간단한 패턴 기반)"""
+        import re
+
+        entities = {}
+
+        # URL 추출
+        urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]*', text)
+        if urls:
+            entities["urls"] = list(set(urls))[:10]
+
+        # IP 주소 추출
+        ips = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', text)
+        if ips:
+            entities["ip_addresses"] = list(set(ips))[:10]
+
+        # 도메인 추출
+        domains = re.findall(r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b', text.lower())
+        if domains:
+            entities["domains"] = list(set(domains))[:10]
+
+        return entities
+
+    def _extract_keywords(self, text: str) -> List[str]:
+        """중요 키워드 추출 (단순 빈도 기반)"""
+        # 불용어 제외
+        stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+                     'of', 'is', 'was', 'are', 'be', 'have', 'has', 'do', 'does', 'did',
+                     'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they'}
+
+        words = text.lower().split()
+        # 길이 4 이상의 단어만 고려
+        filtered_words = [w for w in words if len(w) > 4 and w not in stopwords and w.isalpha()]
+
+        # 빈도 계산
+        from collections import Counter
+        word_freq = Counter(filtered_words)
+
+        # 상위 10개 키워드
+        keywords = [word for word, _ in word_freq.most_common(10)]
+        return keywords
+
+    async def crawl(
+        self, crawl_request: PlaywrightCrawlRequest
+    ) -> Dict[str, Any]:
+        """자동 크롤링 및 지능형 분석"""
+        import re
+        from urllib.parse import urljoin, urlparse
+
+        if self.debug_mode:
+            logger.info(f"DEBUG MODE: Crawler Mock 데이터 반환 (URL: {crawl_request.url})")
+            return {
+                "start_url": crawl_request.url,
+                "pages_crawled": 3,
+                "max_depth": crawl_request.max_depth,
+                "summary": {
+                    "primary_purpose": "Mock User Profile Page",
+                    "key_findings": ["4 repositories", "Public profile", "Active developer"],
+                    "social_links": {"github": ["https://github.com/kjmkjmkj"]},
+                    "risks": ["No obvious security risks detected"],
+                },
+                "pages": [
+                    {
+                        "url": crawl_request.url,
+                        "title": "Mock Profile",
+                        "purpose": "User/Profile Page",
+                        "key_info": {"social_media": {"github": ["https://github.com/kjmkjmkj"]}},
+                        "depth": 0,
+                    }
+                ],
+                "status": "completed",
+                "note": "Mock data in DEBUG_MODE",
+            }
+
+        try:
+            self.visited_urls = set()
+            self.crawl_results = []
+
+            start_time = time.time()
+            async with async_playwright() as p:
+                browser = await p.chromium.launch()
+
+                await self._crawl_recursive(
+                    crawl_request.url,
+                    browser,
+                    crawl_request,
+                    depth=0
+                )
+
+                await browser.close()
+
+            execution_time = time.time() - start_time
+
+            # 분석 결과 종합
+            summary = self._generate_summary(self.crawl_results, crawl_request.url)
+
+            return {
+                "start_url": crawl_request.url,
+                "pages_crawled": len(self.crawl_results),
+                "max_depth": crawl_request.max_depth,
+                "summary": summary,
+                "pages": self.crawl_results,
+                "status": "completed",
+                "execution_time_ms": int(execution_time * 1000),
+            }
+
+        except Exception as e:
+            logger.error(f"Playwright 크롤링 실패: {e}")
+            raise HTTPException(status_code=500, detail=f"크롤링 오류: {str(e)}")
+
+    async def _crawl_recursive(
+        self,
+        url: str,
+        browser,
+        crawl_request: PlaywrightCrawlRequest,
+        depth: int
+    ) -> None:
+        """재귀적 크롤링"""
+        import re
+        from urllib.parse import urljoin, urlparse
+
+        # 방문 제한 확인
+        if url in self.visited_urls:
+            return
+        if len(self.crawl_results) >= crawl_request.max_pages:
+            return
+        if depth > crawl_request.max_depth:
+            return
+
+        # URL 패턴 확인
+        if crawl_request.url_pattern:
+            if not re.search(crawl_request.url_pattern, url):
+                return
+
+        # 같은 도메인 확인
+        start_domain = urlparse(crawl_request.url).netloc
+        current_domain = urlparse(url).netloc
+        if start_domain != current_domain:
+            return
+
+        self.visited_urls.add(url)
+
+        try:
+            page = await browser.new_page()
+            logger.info(f"크롤링: {url} (깊이: {depth})")
+
+            await page.goto(
+                url,
+                timeout=crawl_request.timeout * 1000,
+                wait_until="load"
+            )
+
+            # 페이지 분석
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # 텍스트 추출
+            for script in soup(["script", "style"]):
+                script.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+
+            # 메타데이터
+            title = await page.title()
+
+            # 분석
+            page_analysis = {}
+            if crawl_request.analyze_content:
+                page_analysis = self._analyze_content(html, text, url)
+
+            # 링크 추출
+            links = []
+            if crawl_request.extract_links:
+                for link in soup.find_all("a", href=True):
+                    href = link["href"]
+                    # 상대 URL을 절대 URL로 변환
+                    absolute_url = urljoin(url, href)
+                    # 프래그먼트 제거
+                    absolute_url = absolute_url.split("#")[0]
+                    if absolute_url not in self.visited_urls:
+                        links.append(absolute_url)
+
+            # 결과 저장
+            self.crawl_results.append({
+                "url": url,
+                "depth": depth,
+                "title": title,
+                "text": text[:1500] if crawl_request.extract_text else "",
+                **page_analysis
+            })
+
+            # 다음 레벨 크롤링
+            if depth < crawl_request.max_depth:
+                for link in links[:5]:  # 각 페이지당 최대 5개 링크만 따라가기
+                    if len(self.crawl_results) < crawl_request.max_pages:
+                        await self._crawl_recursive(
+                            link,
+                            browser,
+                            crawl_request,
+                            depth + 1
+                        )
+
+            await page.close()
+
+        except Exception as e:
+            logger.error(f"크롤링 중 오류 ({url}): {e}")
+
+    def _generate_summary(self, results: List[Dict], start_url: str) -> Dict[str, Any]:
+        """크롤링 결과 종합 분석"""
+        if not results:
+            return {"status": "no_results"}
+
+        # 첫 번째 페이지를 주요 분석 대상으로
+        primary = results[0]
+
+        summary = {
+            "primary_purpose": primary.get("page_purpose", "Unknown"),
+            "total_pages_analyzed": len(results),
+            "key_findings": [],
+            "all_entities": {
+                "emails": set(),
+                "social_media": {},
+                "urls": set(),
+                "domains": set(),
+            },
+            "risks": set(),
+            "top_keywords": [],
+        }
+
+        # 모든 페이지에서 정보 통합
+        for result in results:
+            # 리스크 통합
+            if "potential_risks" in result:
+                summary["risks"].update(result["potential_risks"])
+
+            # 엔티티 통합
+            if "entities" in result:
+                for entity_type, values in result["entities"].items():
+                    if entity_type in summary["all_entities"]:
+                        if isinstance(values, list):
+                            summary["all_entities"][entity_type].update(values)
+
+            # 주요 정보
+            if "key_information" in result:
+                if "emails" in result["key_information"]:
+                    summary["all_entities"]["emails"].update(result["key_information"]["emails"])
+                if "social_media" in result["key_information"]:
+                    summary["all_entities"]["social_media"].update(result["key_information"]["social_media"])
+
+            # 키워드
+            if "keywords" in result:
+                summary["top_keywords"].extend(result["keywords"][:3])
+
+        # Set을 List로 변환
+        summary["all_entities"]["emails"] = list(summary["all_entities"]["emails"])[:10]
+        summary["all_entities"]["urls"] = list(summary["all_entities"]["urls"])[:10]
+        summary["all_entities"]["domains"] = list(summary["all_entities"]["domains"])[:10]
+        summary["risks"] = list(summary["risks"])
+
+        # 키워드 중복 제거 및 상위 10개만
+        from collections import Counter
+        keyword_counts = Counter(summary["top_keywords"])
+        summary["top_keywords"] = [word for word, _ in keyword_counts.most_common(10)]
+
+        # 주요 발견사항
+        if summary["all_entities"]["social_media"]:
+            summary["key_findings"].append(f"Found social media links: {list(summary['all_entities']['social_media'].keys())}")
+        if summary["all_entities"]["emails"]:
+            summary["key_findings"].append(f"Found {len(summary['all_entities']['emails'])} email addresses")
+        if len(results) > 1:
+            summary["key_findings"].append(f"Crawled {len(results)} related pages")
+        if summary["all_entities"]["urls"]:
+            summary["key_findings"].append(f"Found {len(summary['all_entities']['urls'])} external URLs")
+
+        return summary
 
 
 class VTClient:
@@ -741,6 +1164,44 @@ MCP_TOOLS = [
             "required": ["ip_address"],
         },
     },
+    {
+        "name": "crawl_and_analyze_url",
+        "description": "Playwright를 사용하여 URL을 자동으로 크롤링하고 지능형 분석을 수행합니다. 페이지 목적 파악, 주요 정보 추출, 보안 위험 감지, 관련 페이지 자동 탐색",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "시작할 URL",
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "크롤링 깊이 (기본값: 2)",
+                    "default": 2,
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "description": "최대 방문 페이지 수 (기본값: 10)",
+                    "default": 10,
+                },
+                "url_pattern": {
+                    "type": "string",
+                    "description": "크롤링할 URL 패턴 (정규표현식, 예: .*github.com.*)",
+                },
+                "analyze_content": {
+                    "type": "boolean",
+                    "description": "지능형 콘텐츠 분석 (기본값: true)",
+                    "default": True,
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "전체 크롤링 타임아웃 (초, 기본값: 60)",
+                    "default": 60,
+                },
+            },
+            "required": ["url"],
+        },
+    },
 ]
 
 
@@ -969,6 +1430,43 @@ async def mcp_unified_endpoint(request: Request):
                     },
                 }
 
+            # Tool 6: crawl_and_analyze_url
+            elif tool_name == "crawl_and_analyze_url":
+                start_time = time.time()
+                crawl_req = PlaywrightCrawlRequest(
+                    url=arguments.get("url"),
+                    max_depth=arguments.get("max_depth", 2),
+                    max_pages=arguments.get("max_pages", 10),
+                    url_pattern=arguments.get("url_pattern"),
+                    extract_text=arguments.get("extract_text", True),
+                    extract_links=arguments.get("extract_links", True),
+                    analyze_content=arguments.get("analyze_content", True),
+                    timeout=arguments.get("timeout", 60),
+                )
+
+                result = await playwright_client.crawl(crawl_req)
+                execution_time = (time.time() - start_time) * 1000
+
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        **result,
+                                        "execution_time_ms": int(execution_time),
+                                    },
+                                    indent=2,
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        ]
+                    },
+                }
+
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -1015,6 +1513,7 @@ if __name__ == "__main__":
     logger.info("   3️⃣  analyze_url_playwright - URL 분석")
     logger.info("   4️⃣  check_virustotal_domain - VirusTotal 도메인 확인")
     logger.info("   5️⃣  check_virustotal_ip - VirusTotal IP 확인")
+    logger.info("   6️⃣  crawl_and_analyze_url - URL 자동 크롤링 & 지능형 분석")
     logger.info("")
     logger.info("📍 엔드포인트:")
     logger.info(f"   http://localhost:{port}/ (서버 정보)")
