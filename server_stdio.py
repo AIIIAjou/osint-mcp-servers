@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-OSINT Unified MCP Server - fastmcp Architecture
+OSINT Unified MCP Server - fastmcp Architecture (STDIO Mode)
 통합 OSINT MCP 서버 - fastmcp 기반 (stdio 기반)
 
 Phase 1 구현: 기존 server.py의 7개 tool을 fastmcp로 마이그레이션
-목표: fastmcp를 통한 stdio 기반 MCP 서버
+목표: fastmcp를 통한 stdio 기반 MCP 서버 (Claude Desktop 호환)
 """
 
 import os
@@ -1271,10 +1271,10 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
 
 if __name__ == "__main__":
     logger.info("=" * 70)
-    logger.info("Starting OSINT Unified MCP Server (fastmcp - HTTP JSON-RPC mode)")
+    logger.info("Starting OSINT Unified MCP Server (fastmcp - STDIO mode)")
     logger.info("=" * 70)
     logger.info(f"DEBUG 모드: {DEBUG_MODE}")
-    logger.info(f"Server: http://0.0.0.0:8000")
+    logger.info("Transport: STDIO (Claude Desktop 호환)")
     logger.info("")
     logger.info("✅ 활성화된 OSINT 도구:")
     logger.info("   1. search_intelligence_x - 다크웹/유출 데이터 검색")
@@ -1285,4 +1285,4 @@ if __name__ == "__main__":
     logger.info("   6. crawl_and_analyze_url - URL 자동 크롤링 & 지능형 분석")
     logger.info("=" * 70)
 
-    server.run(transport="http", host="0.0.0.0", port=8000, stateless_http=True)
+    server.run()
