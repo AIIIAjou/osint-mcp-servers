@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-OSINT Unified MCP Server - fastmcp Architecture
-통합 OSINT MCP 서버 - fastmcp 기반 (stdio 기반)
-
-Phase 1 구현: 기존 server.py의 7개 tool을 fastmcp로 마이그레이션
-목표: fastmcp를 통한 stdio 기반 MCP 서버
+OSINT Unified MCP Server - stdio/Claude Desktop App Compatible
+통합 OSINT MCP 서버 - Claude Desktop 호환
 """
 
 import os
 import json
 import time
 import logging
-import asyncio
 import subprocess
 import base64
 from typing import Any, Dict, List, Optional
@@ -23,21 +19,25 @@ try:
     from intelxapi import intelx
 except ImportError:
     intelx = None
+
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
-import requests
 from pydantic import BaseModel, Field
+import requests
 
-from fastmcp import FastMCP
+# fastmcp 라이브러리 사용
+try:
+    from fastmcp import mcp
+except ImportError:
+    print("fastmcp 설치 필요: pip install fastmcp")
+    exit(1)
 
 # ============================================================================
-# Phase 0: 초기화 및 환경설정
+# 초기화 및 환경설정
 # ============================================================================
 
-# .env 파일 로드
 load_dotenv()
 
-# 로깅 설정
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -60,65 +60,16 @@ if not VIRUSTOTAL_API_KEY and not DEBUG_MODE:
     )
 
 if DEBUG_MODE:
-    logger.info("🔧 DEBUG_MODE 활성화 - Mock 데이터 사용")
+    logger.info("DEBUG_MODE 활성화 - Mock 데이터 사용")
 
 # ============================================================================
-# Phase 1: Pydantic 모델
+# MCP 서버 초기화
 # ============================================================================
 
-
-class SearchRequest(BaseModel):
-    term: str = Field(..., description="검색할 셀렉터 (이메일, 도메인, IP 등)")
-    maxresults: int = Field(100, description="최대 결과 수")
-    timeout: int = Field(5, description="타임아웃 (초)")
-    buckets: Optional[List[str]] = Field(None, description="검색할 버킷 목록")
-    datefrom: Optional[str] = Field(None, description="시작 날짜 (YYYY-MM-DD)")
-    dateto: Optional[str] = Field(None, description="종료 날짜 (YYYY-MM-DD)")
-
-
-class SherlockSearchRequest(BaseModel):
-    username: str = Field(..., description="검색할 사용자명")
-    sites: Optional[List[str]] = Field(
-        None, description="검색할 사이트 목록 (예: ['github', 'twitter'])"
-    )
-    timeout: int = Field(120, description="타임아웃 (초, 기본값: 120초)")
-
-
-class PlaywrightAnalyzeRequest(BaseModel):
-    url: str = Field(..., description="분석할 URL")
-    extract_metadata: bool = Field(
-        True, description="메타데이터 추출 (제목, 설명, 이미지)"
-    )
-    extract_text: bool = Field(True, description="페이지 텍스트 추출")
-    extract_links: bool = Field(True, description="링크 목록 추출")
-    screenshot: bool = Field(False, description="스크린샷 캡처")
-    wait_for_selector: Optional[str] = Field(
-        None, description="특정 요소가 로드될 때까지 대기"
-    )
-    timeout: int = Field(30, description="타임아웃 (초)")
-
-
-class PlaywrightCrawlRequest(BaseModel):
-    url: str = Field(..., description="시작할 URL")
-    max_depth: int = Field(2, description="크롤링 깊이 (기본값: 2)")
-    max_pages: int = Field(10, description="최대 방문 페이지 수 (기본값: 10)")
-    url_pattern: Optional[str] = Field(
-        None, description="크롤링할 URL 패턴 (정규표현식, 예: .*github.com.*)"
-    )
-    extract_text: bool = Field(True, description="페이지 텍스트 추출")
-    extract_links: bool = Field(True, description="링크 추출")
-    analyze_content: bool = Field(True, description="지능형 콘텐츠 분석")
-    timeout: int = Field(60, description="전체 크롤링 타임아웃 (초)")
-
-
-class ThreatIntelRequest(BaseModel):
-    query: str = Field(..., description="조회할 대상 (도메인 또는 IP)")
-    query_type: str = Field("domain", description="조회 타입: domain 또는 ip")
-    timeout: int = Field(10, description="타임아웃 (초)")
-
+server = mcp.Server("osint-mcp-server")
 
 # ============================================================================
-# Phase 2: Client Classes (기존 구현 유지)
+# Client Classes
 # ============================================================================
 
 
@@ -133,13 +84,13 @@ class IntelligenceXClient:
             self.client = intelx(api_key)
             self.client.API_ROOT = "https://free.intelx.io"
 
-    def search(self, search_request: SearchRequest) -> Dict[str, Any]:
+    def search(self, term: str, maxresults: int = 100, timeout: int = 5) -> Dict[str, Any]:
         if self.debug_mode:
-            logger.info(f"DEBUG MODE: Mock 데이터 반환 (검색어: {search_request.term})")
+            logger.info(f"DEBUG MODE: Mock 데이터 반환 (검색어: {term})")
             return {
                 "records": [
                     {
-                        "name": f"Mock Result 1 for {search_request.term}",
+                        "name": f"Mock Result 1 for {term}",
                         "description": "This is a mock result for testing purposes",
                         "date": datetime.now().isoformat(),
                         "media": 1,
@@ -149,7 +100,7 @@ class IntelligenceXClient:
                         "bucket": "mock-bucket",
                     },
                     {
-                        "name": f"Mock Result 2 for {search_request.term}",
+                        "name": f"Mock Result 2 for {term}",
                         "description": "Second mock result for testing",
                         "date": "2025-10-25T12:00:00",
                         "media": 1,
@@ -163,17 +114,13 @@ class IntelligenceXClient:
 
         try:
             if not self.client:
-                raise ValueError("API 키가 설정되지 않았습니다.")
+                raise Exception("API 키가 설정되지 않았습니다.")
 
-            results = self.client.search(
-                search_request.term,
-                maxresults=search_request.maxresults,
-                timeout=search_request.timeout,
-            )
+            results = self.client.search(term, maxresults=maxresults, timeout=timeout)
             return results
         except Exception as e:
             logger.error(f"검색 요청 실패: {e}")
-            raise ValueError(f"Intelligence X API 오류: {str(e)}")
+            raise
 
 
 class SherlockClient:
@@ -182,20 +129,18 @@ class SherlockClient:
     def __init__(self):
         self.debug_mode = DEBUG_MODE
 
-    def search(self, search_request: SherlockSearchRequest) -> Dict[str, Any]:
+    def search(self, username: str, sites: Optional[List[str]] = None, timeout: int = 120) -> Dict[str, Any]:
         """Sherlock으로 사용자명 검색"""
         if self.debug_mode:
-            logger.info(
-                f"DEBUG MODE: Sherlock Mock 데이터 반환 (사용자명: {search_request.username})"
-            )
+            logger.info(f"DEBUG MODE: Sherlock Mock 데이터 반환 (사용자명: {username})")
             return {
                 "found": {
                     "github": {
-                        "url": f"https://github.com/{search_request.username}",
+                        "url": f"https://github.com/{username}",
                         "status": "found",
                     },
                     "twitter": {
-                        "url": f"https://twitter.com/{search_request.username}",
+                        "url": f"https://twitter.com/{username}",
                         "status": "found",
                     },
                 },
@@ -205,10 +150,10 @@ class SherlockClient:
             }
 
         try:
-            cmd = ["sherlock", search_request.username, "--no-color", "--no-txt"]
+            cmd = ["sherlock", username, "--no-color", "--no-txt"]
 
-            if search_request.sites:
-                for site in search_request.sites:
+            if sites:
+                for site in sites:
                     cmd.extend(["--site", site])
 
             logger.info(f"Sherlock 검색 실행: {' '.join(cmd)}")
@@ -216,7 +161,7 @@ class SherlockClient:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=search_request.timeout * len(search_request.sites or [100]),
+                timeout=timeout * len(sites or [100]),
             )
 
             found_accounts = {}
@@ -235,16 +180,16 @@ class SherlockClient:
             return {
                 "found": found_accounts,
                 "total_found": total_found,
-                "username": search_request.username,
+                "username": username,
                 "timestamp": datetime.now().isoformat(),
                 "status": "completed",
             }
         except subprocess.TimeoutExpired:
-            logger.error(f"Sherlock 타임아웃: {search_request.username}")
-            raise TimeoutError("Sherlock 검색 타임아웃")
+            logger.error(f"Sherlock 타임아웃: {username}")
+            raise Exception(f"Sherlock 타임아웃")
         except Exception as e:
             logger.error(f"Sherlock 검색 실패: {e}")
-            raise ValueError(f"Sherlock 검색 오류: {str(e)}")
+            raise
 
 
 class PlaywrightClient:
@@ -256,15 +201,20 @@ class PlaywrightClient:
         self.crawl_results = []
 
     async def analyze(
-        self, analyze_request: PlaywrightAnalyzeRequest
+        self,
+        url: str,
+        extract_metadata: bool = True,
+        extract_text: bool = True,
+        extract_links: bool = True,
+        screenshot: bool = False,
+        wait_for_selector: Optional[str] = None,
+        timeout: int = 30,
     ) -> Dict[str, Any]:
         """Playwright로 URL 분석"""
         if self.debug_mode:
-            logger.info(
-                f"DEBUG MODE: Playwright Mock 데이터 반환 (URL: {analyze_request.url})"
-            )
+            logger.info(f"DEBUG MODE: Playwright Mock 데이터 반환 (URL: {url})")
             return {
-                "url": analyze_request.url,
+                "url": url,
                 "metadata": {
                     "title": "Mock Page Title",
                     "description": "This is a mock page description",
@@ -284,21 +234,19 @@ class PlaywrightClient:
                 browser = await p.chromium.launch()
                 page = await browser.new_page()
 
-                logger.info(f"Playwright 페이지 로드: {analyze_request.url}")
+                logger.info(f"Playwright 페이지 로드: {url}")
                 await page.goto(
-                    analyze_request.url,
-                    timeout=analyze_request.timeout * 1000,
+                    url,
+                    timeout=timeout * 1000,
                     wait_until="load",
                 )
 
-                if analyze_request.wait_for_selector:
-                    await page.wait_for_selector(
-                        analyze_request.wait_for_selector, timeout=5000
-                    )
+                if wait_for_selector:
+                    await page.wait_for_selector(wait_for_selector, timeout=5000)
 
-                result = {"url": analyze_request.url, "status": "completed"}
+                result = {"url": url, "status": "completed"}
 
-                if analyze_request.extract_metadata:
+                if extract_metadata:
                     title = await page.title()
 
                     try:
@@ -321,7 +269,7 @@ class PlaywrightClient:
                         "image": meta_image or "",
                     }
 
-                if analyze_request.extract_text:
+                if extract_text:
                     html = await page.content()
                     soup = BeautifulSoup(html, "html.parser")
                     for script in soup(["script", "style"]):
@@ -329,7 +277,7 @@ class PlaywrightClient:
                     text = soup.get_text(separator="\n", strip=True)
                     result["text"] = text[:2000] if text else ""
 
-                if analyze_request.extract_links:
+                if extract_links:
                     html = await page.content()
                     soup = BeautifulSoup(html, "html.parser")
                     links = []
@@ -339,7 +287,7 @@ class PlaywrightClient:
                         )
                     result["links"] = links[:50]
 
-                if analyze_request.screenshot:
+                if screenshot:
                     screenshot_bytes = await page.screenshot()
                     result["screenshot"] = base64.b64encode(screenshot_bytes).decode(
                         "utf-8"
@@ -350,7 +298,184 @@ class PlaywrightClient:
 
         except Exception as e:
             logger.error(f"Playwright 분석 실패: {e}")
-            raise ValueError(f"URL 분석 오류: {str(e)}")
+            raise
+
+    async def crawl(
+        self,
+        url: str,
+        max_depth: int = 2,
+        max_pages: int = 10,
+        url_pattern: Optional[str] = None,
+        extract_text: bool = True,
+        extract_links: bool = True,
+        analyze_content: bool = True,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """자동 크롤링 및 지능형 분석"""
+        import re
+        from urllib.parse import urljoin, urlparse
+
+        if self.debug_mode:
+            logger.info(f"DEBUG MODE: Crawler Mock 데이터 반환 (URL: {url})")
+            return {
+                "start_url": url,
+                "pages_crawled": 3,
+                "max_depth": max_depth,
+                "summary": {
+                    "primary_purpose": "Mock User Profile Page",
+                    "key_findings": ["4 repositories", "Public profile", "Active developer"],
+                    "social_links": {"github": ["https://github.com/kjmkjmkj"]},
+                    "risks": ["No obvious security risks detected"],
+                },
+                "pages": [
+                    {
+                        "url": url,
+                        "title": "Mock Profile",
+                        "purpose": "User/Profile Page",
+                        "key_info": {"social_media": {"github": ["https://github.com/kjmkjmkj"]}},
+                        "depth": 0,
+                    }
+                ],
+                "status": "completed",
+                "note": "Mock data in DEBUG_MODE",
+            }
+
+        try:
+            self.visited_urls = set()
+            self.crawl_results = []
+
+            start_time = time.time()
+            async with async_playwright() as p:
+                browser = await p.chromium.launch()
+
+                await self._crawl_recursive(
+                    url,
+                    browser,
+                    max_depth,
+                    max_pages,
+                    url_pattern,
+                    extract_text,
+                    extract_links,
+                    analyze_content,
+                    timeout,
+                    depth=0
+                )
+
+                await browser.close()
+
+            execution_time = time.time() - start_time
+
+            summary = self._generate_summary(self.crawl_results, url)
+
+            return {
+                "start_url": url,
+                "pages_crawled": len(self.crawl_results),
+                "max_depth": max_depth,
+                "summary": summary,
+                "pages": self.crawl_results,
+                "status": "completed",
+                "execution_time_ms": int(execution_time * 1000),
+            }
+
+        except Exception as e:
+            logger.error(f"Playwright 크롤링 실패: {e}")
+            raise
+
+    async def _crawl_recursive(
+        self,
+        url: str,
+        browser,
+        max_depth: int,
+        max_pages: int,
+        url_pattern: Optional[str],
+        extract_text: bool,
+        extract_links: bool,
+        analyze_content: bool,
+        timeout: int,
+        depth: int
+    ) -> None:
+        """재귀적 크롤링"""
+        import re
+        from urllib.parse import urljoin, urlparse
+
+        if url in self.visited_urls:
+            return
+        if len(self.crawl_results) >= max_pages:
+            return
+        if depth > max_depth:
+            return
+
+        if url_pattern:
+            if not re.search(url_pattern, url):
+                return
+
+        start_domain = urlparse(url).netloc
+        current_domain = urlparse(url).netloc
+        if start_domain != current_domain:
+            return
+
+        self.visited_urls.add(url)
+
+        try:
+            page = await browser.new_page()
+            logger.info(f"크롤링: {url} (깊이: {depth})")
+
+            await page.goto(
+                url,
+                timeout=timeout * 1000,
+                wait_until="load"
+            )
+
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            for script in soup(["script", "style"]):
+                script.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+
+            title = await page.title()
+
+            page_analysis = {}
+            if analyze_content:
+                page_analysis = self._analyze_content(html, text, url)
+
+            links = []
+            if extract_links:
+                for link in soup.find_all("a", href=True):
+                    href = link["href"]
+                    absolute_url = urljoin(url, href)
+                    absolute_url = absolute_url.split("#")[0]
+                    if absolute_url not in self.visited_urls:
+                        links.append(absolute_url)
+
+            self.crawl_results.append({
+                "url": url,
+                "depth": depth,
+                "title": title,
+                "text": text[:1500] if extract_text else "",
+                **page_analysis
+            })
+
+            if depth < max_depth:
+                for link in links[:5]:
+                    if len(self.crawl_results) < max_pages:
+                        await self._crawl_recursive(
+                            link,
+                            browser,
+                            max_depth,
+                            max_pages,
+                            url_pattern,
+                            extract_text,
+                            extract_links,
+                            analyze_content,
+                            timeout,
+                            depth + 1
+                        )
+
+            await page.close()
+
+        except Exception as e:
+            logger.error(f"크롤링 중 오류 ({url}): {e}")
 
     def _analyze_content(self, html: str, text: str, url: str) -> Dict[str, Any]:
         """페이지 콘텐츠의 지능형 분석"""
@@ -370,44 +495,23 @@ class PlaywrightClient:
         text_lower = text.lower()
         url_lower = url.lower()
 
-        # 프로필 페이지 감지
-        if any(
-            keyword in text_lower for keyword in ["profile", "about", "bio", "user"]
-        ) or any(keyword in url_lower for keyword in ["profile", "user", "about"]):
+        if any(keyword in text_lower for keyword in ["profile", "about", "bio", "user"]) or \
+           any(keyword in url_lower for keyword in ["profile", "user", "about"]):
             return "User/Profile Page"
 
-        # 로그인 페이지
-        if any(
-            keyword in text_lower
-            for keyword in ["login", "password", "username", "sign in"]
-        ):
+        if any(keyword in text_lower for keyword in ["login", "password", "username", "sign in"]):
             return "Authentication/Login Page"
 
-        # 상거래 사이트
-        if any(
-            keyword in text_lower
-            for keyword in ["price", "buy", "purchase", "cart", "checkout", "product"]
-        ):
+        if any(keyword in text_lower for keyword in ["price", "buy", "purchase", "cart", "checkout", "product"]):
             return "E-commerce/Shopping Page"
 
-        # 문서/블로그
-        if any(
-            keyword in text_lower
-            for keyword in ["article", "blog", "post", "author", "published"]
-        ):
+        if any(keyword in text_lower for keyword in ["article", "blog", "post", "author", "published"]):
             return "Blog/Article Page"
 
-        # 검색 결과
-        if any(
-            keyword in text_lower for keyword in ["search result", "found", "matches"]
-        ):
+        if any(keyword in text_lower for keyword in ["search result", "found", "matches"]):
             return "Search Results Page"
 
-        # API 페이지
-        if "api" in url_lower or any(
-            keyword in text_lower
-            for keyword in ["endpoint", "request", "response", "json"]
-        ):
+        if "api" in url_lower or any(keyword in text_lower for keyword in ["endpoint", "request", "response", "json"]):
             return "API/Technical Documentation"
 
         return "General Content Page"
@@ -418,25 +522,20 @@ class PlaywrightClient:
 
         info = {}
 
-        # 이메일 추출
-        emails = set(
-            re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
-        )
+        emails = set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text))
         if emails:
-            info["emails"] = list(emails)[:5]  # 최대 5개
+            info["emails"] = list(emails)[:5]
 
-        # 전화번호 추출 (간단한 패턴)
-        phones = set(re.findall(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", text))
+        phones = set(re.findall(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', text))
         if phones:
             info["phone_numbers"] = list(phones)[:5]
 
-        # 소셜 미디어 링크 추출
         social_patterns = {
-            "twitter": r"twitter\.com/[\w]+",
-            "github": r"github\.com/[\w-]+",
-            "linkedin": r"linkedin\.com/in/[\w-]+",
-            "instagram": r"instagram\.com/[\w.]+",
-            "facebook": r"facebook\.com/[\w.]+",
+            "twitter": r'twitter\.com/[\w]+',
+            "github": r'github\.com/[\w-]+',
+            "linkedin": r'linkedin\.com/in/[\w-]+',
+            "instagram": r'instagram\.com/[\w.]+',
+            "facebook": r'facebook\.com/[\w.]+',
         }
 
         social_links = {}
@@ -448,10 +547,8 @@ class PlaywrightClient:
         if social_links:
             info["social_media"] = social_links
 
-        # HTML 메타데이터에서 추가 정보
         soup = BeautifulSoup(html, "html.parser")
 
-        # Open Graph 정보
         og_title = soup.find("meta", property="og:title")
         og_description = soup.find("meta", property="og:description")
 
@@ -460,7 +557,6 @@ class PlaywrightClient:
         if og_description:
             info["og_description"] = og_description.get("content")
 
-        # 조직명 추출 시도
         author = soup.find("meta", {"name": "author"})
         if author:
             info["author"] = author.get("content")
@@ -473,47 +569,23 @@ class PlaywrightClient:
         text_lower = text.lower()
         url_lower = url.lower()
 
-        # 피싱 징후
-        if any(
-            keyword in text_lower
-            for keyword in [
-                "verify account",
-                "confirm identity",
-                "update payment",
-                "urgent action required",
-            ]
-        ):
+        if any(keyword in text_lower for keyword in ["verify account", "confirm identity", "update payment", "urgent action required"]):
             risks.append("Potential phishing indicators")
 
-        # 인증 요구
         if "password" in text_lower or "login" in text_lower:
             risks.append("Authentication required - verify legitimacy")
 
-        # 의심 활동
-        if any(
-            keyword in text_lower
-            for keyword in [
-                "limited time",
-                "act now",
-                "verify immediately",
-                "confirm now",
-            ]
-        ):
+        if any(keyword in text_lower for keyword in ["limited time", "act now", "verify immediately", "confirm now"]):
             risks.append("High-pressure/urgency language detected")
 
-        # 외부 스크립트 (XSS 가능성)
         if "<script" in html and "src=" in html:
             script_count = html.count("<script")
             if script_count > 5:
                 risks.append(f"Multiple external scripts detected ({script_count})")
 
-        # HTTP vs HTTPS
-        if url_lower.startswith("http://") and any(
-            keyword in text_lower for keyword in ["password", "payment", "card"]
-        ):
+        if url_lower.startswith("http://") and any(keyword in text_lower for keyword in ["password", "payment", "card"]):
             risks.append("Sensitive data handling over insecure HTTP")
 
-        # 숨겨진 폼
         if "<form" in html and "style" in html.lower():
             if "display:none" in html.lower() or "visibility:hidden" in html.lower():
                 risks.append("Hidden form elements detected")
@@ -521,249 +593,45 @@ class PlaywrightClient:
         return risks if risks else ["No obvious security risks detected"]
 
     def _extract_entities(self, text: str) -> Dict[str, List[str]]:
-        """텍스트에서 엔티티 추출 (간단한 패턴 기반)"""
+        """텍스트에서 엔티티 추출"""
         import re
 
         entities = {}
 
-        # URL 추출
         urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]*', text)
         if urls:
             entities["urls"] = list(set(urls))[:10]
 
-        # IP 주소 추출
-        ips = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
+        ips = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', text)
         if ips:
             entities["ip_addresses"] = list(set(ips))[:10]
 
-        # 도메인 추출
-        domains = re.findall(
-            r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", text.lower()
-        )
+        domains = re.findall(r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b', text.lower())
         if domains:
             entities["domains"] = list(set(domains))[:10]
 
         return entities
 
     def _extract_keywords(self, text: str) -> List[str]:
-        """중요 키워드 추출 (단순 빈도 기반)"""
-        # 불용어 제외
-        stopwords = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "is",
-            "was",
-            "are",
-            "be",
-            "have",
-            "has",
-            "do",
-            "does",
-            "did",
-            "this",
-            "that",
-            "these",
-            "those",
-            "i",
-            "you",
-            "he",
-            "she",
-            "it",
-            "we",
-            "they",
-        }
+        """중요 키워드 추출"""
+        stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+                     'of', 'is', 'was', 'are', 'be', 'have', 'has', 'do', 'does', 'did',
+                     'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they'}
 
         words = text.lower().split()
-        # 길이 4 이상의 단어만 고려
-        filtered_words = [
-            w for w in words if len(w) > 4 and w not in stopwords and w.isalpha()
-        ]
+        filtered_words = [w for w in words if len(w) > 4 and w not in stopwords and w.isalpha()]
 
-        # 빈도 계산
         from collections import Counter
-
         word_freq = Counter(filtered_words)
 
-        # 상위 10개 키워드
         keywords = [word for word, _ in word_freq.most_common(10)]
         return keywords
-
-    async def crawl(self, crawl_request: PlaywrightCrawlRequest) -> Dict[str, Any]:
-        """자동 크롤링 및 지능형 분석"""
-        import re
-        from urllib.parse import urljoin, urlparse
-
-        if self.debug_mode:
-            logger.info(
-                f"DEBUG MODE: Crawler Mock 데이터 반환 (URL: {crawl_request.url})"
-            )
-            return {
-                "start_url": crawl_request.url,
-                "pages_crawled": 3,
-                "max_depth": crawl_request.max_depth,
-                "summary": {
-                    "primary_purpose": "Mock User Profile Page",
-                    "key_findings": [
-                        "4 repositories",
-                        "Public profile",
-                        "Active developer",
-                    ],
-                    "social_links": {"github": ["https://github.com/kjmkjmkj"]},
-                    "risks": ["No obvious security risks detected"],
-                },
-                "pages": [
-                    {
-                        "url": crawl_request.url,
-                        "title": "Mock Profile",
-                        "purpose": "User/Profile Page",
-                        "key_info": {
-                            "social_media": {"github": ["https://github.com/kjmkjmkj"]}
-                        },
-                        "depth": 0,
-                    }
-                ],
-                "status": "completed",
-                "note": "Mock data in DEBUG_MODE",
-            }
-
-        try:
-            self.visited_urls = set()
-            self.crawl_results = []
-
-            start_time = time.time()
-            async with async_playwright() as p:
-                browser = await p.chromium.launch()
-
-                await self._crawl_recursive(
-                    crawl_request.url, browser, crawl_request, depth=0
-                )
-
-                await browser.close()
-
-            execution_time = time.time() - start_time
-
-            # 분석 결과 종합
-            summary = self._generate_summary(self.crawl_results, crawl_request.url)
-
-            return {
-                "start_url": crawl_request.url,
-                "pages_crawled": len(self.crawl_results),
-                "max_depth": crawl_request.max_depth,
-                "summary": summary,
-                "pages": self.crawl_results,
-                "status": "completed",
-                "execution_time_ms": int(execution_time * 1000),
-            }
-
-        except Exception as e:
-            logger.error(f"Playwright 크롤링 실패: {e}")
-            raise ValueError(f"크롤링 오류: {str(e)}")
-
-    async def _crawl_recursive(
-        self, url: str, browser, crawl_request: PlaywrightCrawlRequest, depth: int
-    ) -> None:
-        """재귀적 크롤링"""
-        import re
-        from urllib.parse import urljoin, urlparse
-
-        # 방문 제한 확인
-        if url in self.visited_urls:
-            return
-        if len(self.crawl_results) >= crawl_request.max_pages:
-            return
-        if depth > crawl_request.max_depth:
-            return
-
-        # URL 패턴 확인
-        if crawl_request.url_pattern:
-            if not re.search(crawl_request.url_pattern, url):
-                return
-
-        # 같은 도메인 확인
-        start_domain = urlparse(crawl_request.url).netloc
-        current_domain = urlparse(url).netloc
-        if start_domain != current_domain:
-            return
-
-        self.visited_urls.add(url)
-
-        try:
-            page = await browser.new_page()
-            logger.info(f"크롤링: {url} (깊이: {depth})")
-
-            await page.goto(
-                url, timeout=crawl_request.timeout * 1000, wait_until="load"
-            )
-
-            # 페이지 분석
-            html = await page.content()
-            soup = BeautifulSoup(html, "html.parser")
-
-            # 텍스트 추출
-            for script in soup(["script", "style"]):
-                script.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-
-            # 메타데이터
-            title = await page.title()
-
-            # 분석
-            page_analysis = {}
-            if crawl_request.analyze_content:
-                page_analysis = self._analyze_content(html, text, url)
-
-            # 링크 추출
-            links = []
-            if crawl_request.extract_links:
-                for link in soup.find_all("a", href=True):
-                    href = link["href"]
-                    # 상대 URL을 절대 URL로 변환
-                    absolute_url = urljoin(url, href)
-                    # 프래그먼트 제거
-                    absolute_url = absolute_url.split("#")[0]
-                    if absolute_url not in self.visited_urls:
-                        links.append(absolute_url)
-
-            # 결과 저장
-            self.crawl_results.append(
-                {
-                    "url": url,
-                    "depth": depth,
-                    "title": title,
-                    "text": text[:1500] if crawl_request.extract_text else "",
-                    **page_analysis,
-                }
-            )
-
-            # 다음 레벨 크롤링
-            if depth < crawl_request.max_depth:
-                for link in links[:5]:  # 각 페이지당 최대 5개 링크만 따라가기
-                    if len(self.crawl_results) < crawl_request.max_pages:
-                        await self._crawl_recursive(
-                            link, browser, crawl_request, depth + 1
-                        )
-
-            await page.close()
-
-        except Exception as e:
-            logger.error(f"크롤링 중 오류 ({url}): {e}")
 
     def _generate_summary(self, results: List[Dict], start_url: str) -> Dict[str, Any]:
         """크롤링 결과 종합 분석"""
         if not results:
             return {"status": "no_results"}
 
-        # 첫 번째 페이지를 주요 분석 대상으로
         primary = results[0]
 
         summary = {
@@ -780,63 +648,42 @@ class PlaywrightClient:
             "top_keywords": [],
         }
 
-        # 모든 페이지에서 정보 통합
         for result in results:
-            # 리스크 통합
             if "potential_risks" in result:
                 summary["risks"].update(result["potential_risks"])
 
-            # 엔티티 통합
             if "entities" in result:
                 for entity_type, values in result["entities"].items():
                     if entity_type in summary["all_entities"]:
                         if isinstance(values, list):
                             summary["all_entities"][entity_type].update(values)
 
-            # 주요 정보
             if "key_information" in result:
                 if "emails" in result["key_information"]:
-                    summary["all_entities"]["emails"].update(
-                        result["key_information"]["emails"]
-                    )
+                    summary["all_entities"]["emails"].update(result["key_information"]["emails"])
                 if "social_media" in result["key_information"]:
-                    summary["all_entities"]["social_media"].update(
-                        result["key_information"]["social_media"]
-                    )
+                    summary["all_entities"]["social_media"].update(result["key_information"]["social_media"])
 
-            # 키워드
             if "keywords" in result:
                 summary["top_keywords"].extend(result["keywords"][:3])
 
-        # Set을 List로 변환
         summary["all_entities"]["emails"] = list(summary["all_entities"]["emails"])[:10]
         summary["all_entities"]["urls"] = list(summary["all_entities"]["urls"])[:10]
-        summary["all_entities"]["domains"] = list(summary["all_entities"]["domains"])[
-            :10
-        ]
+        summary["all_entities"]["domains"] = list(summary["all_entities"]["domains"])[:10]
         summary["risks"] = list(summary["risks"])
 
-        # 키워드 중복 제거 및 상위 10개만
         from collections import Counter
-
         keyword_counts = Counter(summary["top_keywords"])
         summary["top_keywords"] = [word for word, _ in keyword_counts.most_common(10)]
 
-        # 주요 발견사항
         if summary["all_entities"]["social_media"]:
-            summary["key_findings"].append(
-                f"Found social media links: {list(summary['all_entities']['social_media'].keys())}"
-            )
+            summary["key_findings"].append(f"Found social media links: {list(summary['all_entities']['social_media'].keys())}")
         if summary["all_entities"]["emails"]:
-            summary["key_findings"].append(
-                f"Found {len(summary['all_entities']['emails'])} email addresses"
-            )
+            summary["key_findings"].append(f"Found {len(summary['all_entities']['emails'])} email addresses")
         if len(results) > 1:
             summary["key_findings"].append(f"Crawled {len(results)} related pages")
         if summary["all_entities"]["urls"]:
-            summary["key_findings"].append(
-                f"Found {len(summary['all_entities']['urls'])} external URLs"
-            )
+            summary["key_findings"].append(f"Found {len(summary['all_entities']['urls'])} external URLs")
 
         return summary
 
@@ -1069,7 +916,7 @@ class VTClient:
 
 
 # ============================================================================
-# Phase 3: Client 인스턴스 생성
+# Client 인스턴스 생성
 # ============================================================================
 
 intelx_client = IntelligenceXClient(INTELX_API_KEY)
@@ -1078,14 +925,7 @@ playwright_client = PlaywrightClient()
 vt_client = VTClient(VIRUSTOTAL_API_KEY)
 
 # ============================================================================
-# Phase 4: MCP 서버 초기화
-# ============================================================================
-
-server = FastMCP("osint-mcp-server", stateless_http=True)
-
-
-# ============================================================================
-# Phase 5: MCP Tools (@server.tool() 데코레이터 사용)
+# MCP Tools 정의 (@tool 데코레이터 사용)
 # ============================================================================
 
 
@@ -1103,37 +943,27 @@ def search_intelligence_x(term: str, maxresults: int = 100) -> str:
     """
     try:
         start_time = time.time()
-        search_req = SearchRequest(
-            term=term,
-            maxresults=maxresults,
-        )
-        result = intelx_client.search(search_req)
+        result = intelx_client.search(term, maxresults=maxresults)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Intelligence X 검색 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 @server.tool()
-def search_username_sherlock(
-    username: str, sites: Optional[str] = None, timeout: int = 120
-) -> str:
+def search_username_sherlock(username: str, sites: Optional[str] = None, timeout: int = 120) -> str:
     """
     Sherlock을 사용하여 사용자명을 여러 웹사이트에서 검색합니다.
 
     Args:
         username: 검색할 사용자명 (예: john_doe)
         sites: 검색할 사이트 목록 (쉼표로 구분, 예: 'github,twitter,reddit')
-        timeout: 검색 타임아웃 (기본값 300)
+        timeout: 검색 타임아웃 (초, 기본값: 120)
 
     Returns:
         JSON 형식의 검색 결과
@@ -1142,24 +972,15 @@ def search_username_sherlock(
         start_time = time.time()
         sites_list = None
         if sites:
-            sites_list = [s.strip() for s in sites.split(",")]
+            sites_list = [s.strip() for s in sites.split(',')]
 
-        sherlock_req = SherlockSearchRequest(
-            username=username,
-            sites=sites_list,
-            timeout=timeout,
-        )
-        result = sherlock_client.search(sherlock_req)
+        result = sherlock_client.search(username, sites=sites_list, timeout=timeout)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Sherlock 검색 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -1172,7 +993,7 @@ async def analyze_url_playwright(
     extract_text: bool = True,
     extract_links: bool = True,
     screenshot: bool = False,
-    timeout: int = 30,
+    timeout: int = 30
 ) -> str:
     """
     Playwright를 사용하여 URL을 분석합니다.
@@ -1190,25 +1011,20 @@ async def analyze_url_playwright(
     """
     try:
         start_time = time.time()
-        playwright_req = PlaywrightAnalyzeRequest(
-            url=url,
+        result = await playwright_client.analyze(
+            url,
             extract_metadata=extract_metadata,
             extract_text=extract_text,
             extract_links=extract_links,
             screenshot=screenshot,
-            timeout=timeout,
+            timeout=timeout
         )
-        result = await playwright_client.analyze(playwright_req)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"URL 분석 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -1230,14 +1046,10 @@ def check_virustotal_domain(domain: str) -> str:
         result = vt_client.query_domain(domain)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"VirusTotal 도메인 조회 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -1259,14 +1071,10 @@ def check_virustotal_ip(ip_address: str) -> str:
         result = vt_client.query_ip(ip_address)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"VirusTotal IP 조회 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -1279,7 +1087,7 @@ async def crawl_and_analyze_url(
     max_pages: int = 10,
     url_pattern: Optional[str] = None,
     analyze_content: bool = True,
-    timeout: int = 60,
+    timeout: int = 60
 ) -> str:
     """
     Playwright를 사용하여 URL을 자동으로 크롤링하고 지능형 분석을 수행합니다.
@@ -1297,44 +1105,42 @@ async def crawl_and_analyze_url(
     """
     try:
         start_time = time.time()
-        crawl_req = PlaywrightCrawlRequest(
-            url=url,
+        result = await playwright_client.crawl(
+            url,
             max_depth=max_depth,
             max_pages=max_pages,
             url_pattern=url_pattern,
             analyze_content=analyze_content,
-            timeout=timeout,
+            timeout=timeout
         )
-        result = await playwright_client.crawl(crawl_req)
         execution_time = (time.time() - start_time) * 1000
 
-        return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+        return json.dumps({
+            **result,
+            "execution_time_ms": int(execution_time),
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
+# ============================================================================
+# 서버 실행
+# ============================================================================
+
 if __name__ == "__main__":
     logger.info("=" * 70)
-    logger.info("Starting OSINT Unified MCP Server (fastmcp - HTTP JSON-RPC mode)")
+    logger.info("Starting OSINT MCP Server (stdio mode for Claude Desktop)")
     logger.info("=" * 70)
-    logger.info(f"DEBUG 모드: {DEBUG_MODE}")
-    logger.info(f"Server: http://0.0.0.0:8000")
+    logger.info(f"DEBUG_MODE: {DEBUG_MODE}")
     logger.info("")
-    logger.info("✅ 활성화된 OSINT 도구:")
-    logger.info("   1. search_intelligence_x - 다크웹/유출 데이터 검색")
-    logger.info("   2. search_username_sherlock - 사용자명 검색")
-    logger.info("   3. analyze_url_playwright - URL 분석")
-    logger.info("   4. check_virustotal_domain - VirusTotal 도메인 확인")
-    logger.info("   5. check_virustotal_ip - VirusTotal IP 확인")
-    logger.info("   6. crawl_and_analyze_url - URL 자동 크롤링 & 지능형 분석")
+    logger.info("Available Tools:")
+    logger.info("  1. search_intelligence_x")
+    logger.info("  2. search_username_sherlock")
+    logger.info("  3. analyze_url_playwright")
+    logger.info("  4. check_virustotal_domain")
+    logger.info("  5. check_virustotal_ip")
+    logger.info("  6. crawl_and_analyze_url")
     logger.info("=" * 70)
 
-    server.run(transport="http", host="0.0.0.0", port=8000, stateless_http=True)
+    server.run()
