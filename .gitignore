@@ -4,6 +4,7 @@
 .env.*.local
 .claude
 .specify
+.gemini
 # Python
 __pycache__/
 *.py[cod]
