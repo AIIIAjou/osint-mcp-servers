@@ -60,3 +60,10 @@ docker-compose.override.yml
 # Temporary files
 *.tmp
 *.temp
+
+# OSINT Data
+db.csv
+db_export.json
+pdfs/
+sessions/
+results.json

@@ -22,6 +22,10 @@ from pydantic import BaseModel, Field
 
 from fastmcp import FastMCP
 
+# OSINT 데이터베이스 및 PDF 생성 모듈
+from db_manager import OSINTDatabase
+from pdf_generator import PDFGenerator
+
 # ============================================================================
 # Phase 0: 초기화 및 환경설정
 # ============================================================================
@@ -53,6 +57,12 @@ if not VIRUSTOTAL_API_KEY and not DEBUG_MODE:
 
 if DEBUG_MODE:
     logger.info("🔧 DEBUG_MODE 활성화 - Mock 데이터 사용")
+
+# 데이터베이스 및 PDF 생성기 초기화
+osint_db = OSINTDatabase("db.csv")
+pdf_generator = PDFGenerator("./pdfs")
+logger.info("✅ OSINT 데이터베이스 초기화 완료")
+logger.info("✅ PDF 생성기 초기화 완료")
 
 # ============================================================================
 # Phase 1: Pydantic 모델
@@ -2064,10 +2074,50 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
         result = await playwright_client.analyze(request)
         execution_time = (time.time() - start_time) * 1000
 
+        # PDF 생성 (비동기)
+        pdf_path = ""
+        try:
+            pdf_path = await pdf_generator.url_to_pdf(request.url)
+        except Exception as pdf_error:
+            logger.warning(f"PDF 생성 실패: {pdf_error}")
+
+        # 분석 결과 요약 생성
+        summary = f"URL: {request.url}"
+        if "metadata" in result and "title" in result["metadata"]:
+            summary += f" | 제목: {result['metadata']['title']}"
+
+        # 중요 정보 추출
+        sensitive_info = {}
+        if "entities" in result:
+            entities = result["entities"]
+            if "emails" in entities:
+                sensitive_info["emails"] = entities["emails"]
+            if "phones" in entities:
+                sensitive_info["phones"] = entities["phones"]
+            if "social_media" in entities:
+                sensitive_info["social_media"] = entities["social_media"]
+
+        # 데이터베이스에 저장
+        try:
+            osint_db.add_record(
+                target=request.url,
+                url=request.url,
+                pdf_path=pdf_path,
+                summary=summary,
+                sensitive_info=sensitive_info,
+                collection_method="analyze_url_playwright",
+                threat_level="unknown",
+                metadata=result
+            )
+        except Exception as db_error:
+            logger.warning(f"DB 저장 실패: {db_error}")
+
         return json.dumps(
             {
                 **result,
                 "execution_time_ms": int(execution_time),
+                "saved_to_db": True,
+                "pdf_path": pdf_path
             },
             indent=2,
             ensure_ascii=False,
@@ -2093,10 +2143,43 @@ def check_virustotal_domain(request: ThreatIntelRequest) -> str:
         result = vt_client.query_domain(request.query)
         execution_time = (time.time() - start_time) * 1000
 
+        # 위협 수준 결정
+        threat_level = "safe"
+        if "stats" in result:
+            stats = result["stats"]
+            malicious = stats.get("malicious", 0)
+            suspicious = stats.get("suspicious", 0)
+
+            if malicious > 0:
+                threat_level = "malicious"
+            elif suspicious > 0:
+                threat_level = "suspicious"
+
+        # 요약 생성
+        summary = f"VirusTotal 도메인 조회: {request.query}"
+        if "stats" in result:
+            summary += f" | 악성: {result['stats'].get('malicious', 0)}, 의심: {result['stats'].get('suspicious', 0)}"
+
+        # 데이터베이스에 저장
+        try:
+            osint_db.add_record(
+                target=request.query,
+                url=f"https://{request.query}",
+                pdf_path="",
+                summary=summary,
+                sensitive_info={},
+                collection_method="check_virustotal_domain",
+                threat_level=threat_level,
+                metadata=result
+            )
+        except Exception as db_error:
+            logger.warning(f"DB 저장 실패: {db_error}")
+
         return json.dumps(
             {
                 **result,
                 "execution_time_ms": int(execution_time),
+                "saved_to_db": True
             },
             indent=2,
             ensure_ascii=False,
@@ -2122,10 +2205,43 @@ def check_virustotal_ip(request: ThreatIntelRequest) -> str:
         result = vt_client.query_ip(request.query)
         execution_time = (time.time() - start_time) * 1000
 
+        # 위협 수준 결정
+        threat_level = "safe"
+        if "stats" in result:
+            stats = result["stats"]
+            malicious = stats.get("malicious", 0)
+            suspicious = stats.get("suspicious", 0)
+
+            if malicious > 0:
+                threat_level = "malicious"
+            elif suspicious > 0:
+                threat_level = "suspicious"
+
+        # 요약 생성
+        summary = f"VirusTotal IP 조회: {request.query}"
+        if "stats" in result:
+            summary += f" | 악성: {result['stats'].get('malicious', 0)}, 의심: {result['stats'].get('suspicious', 0)}"
+
+        # 데이터베이스에 저장
+        try:
+            osint_db.add_record(
+                target=request.query,
+                url=f"http://{request.query}",
+                pdf_path="",
+                summary=summary,
+                sensitive_info={},
+                collection_method="check_virustotal_ip",
+                threat_level=threat_level,
+                metadata=result
+            )
+        except Exception as db_error:
+            logger.warning(f"DB 저장 실패: {db_error}")
+
         return json.dumps(
             {
                 **result,
                 "execution_time_ms": int(execution_time),
+                "saved_to_db": True
             },
             indent=2,
             ensure_ascii=False,
@@ -2151,10 +2267,60 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
         result = await playwright_client.crawl(request)
         execution_time = (time.time() - start_time) * 1000
 
+        # PDF 생성 (첫 번째 페이지만)
+        pdf_path = ""
+        try:
+            pdf_path = await pdf_generator.url_to_pdf(request.url)
+        except Exception as pdf_error:
+            logger.warning(f"PDF 생성 실패: {pdf_error}")
+
+        # 크롤링 결과 요약
+        summary = f"URL 크롤링: {request.url}"
+        if "summary" in result:
+            crawl_summary = result["summary"]
+            summary += f" | 방문 페이지: {crawl_summary.get('total_pages', 0)}개"
+
+        # 모든 페이지에서 중요 정보 수집
+        all_emails = []
+        all_phones = []
+        all_social = []
+
+        if "pages" in result:
+            for page in result["pages"]:
+                if "entities" in page:
+                    entities = page["entities"]
+                    all_emails.extend(entities.get("emails", []))
+                    all_phones.extend(entities.get("phones", []))
+                    all_social.extend(entities.get("social_media", []))
+
+        # 중복 제거
+        sensitive_info = {
+            "emails": list(set(all_emails)),
+            "phones": list(set(all_phones)),
+            "social_media": list(set(all_social))
+        }
+
+        # 데이터베이스에 저장
+        try:
+            osint_db.add_record(
+                target=request.url,
+                url=request.url,
+                pdf_path=pdf_path,
+                summary=summary,
+                sensitive_info=sensitive_info,
+                collection_method="crawl_and_analyze_url",
+                threat_level="unknown",
+                metadata=result
+            )
+        except Exception as db_error:
+            logger.warning(f"DB 저장 실패: {db_error}")
+
         return json.dumps(
             {
                 **result,
                 "execution_time_ms": int(execution_time),
+                "saved_to_db": True,
+                "pdf_path": pdf_path
             },
             indent=2,
             ensure_ascii=False,
