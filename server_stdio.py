@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 # OSINT 데이터베이스 및 PDF 생성 모듈
 from db_manager import OSINTDatabase
 from pdf_generator import PDFGenerator
+from enrichment import InfoEnrichment
 
 # ============================================================================
 # Phase 0: 초기화 및 환경설정
@@ -61,8 +62,10 @@ if DEBUG_MODE:
 # 데이터베이스 및 PDF 생성기 초기화
 osint_db = OSINTDatabase("db.csv")
 pdf_generator = PDFGenerator("./pdfs")
+enricher = InfoEnrichment()
 logger.info("✅ OSINT 데이터베이스 초기화 완료")
 logger.info("✅ PDF 생성기 초기화 완료")
+logger.info("✅ 정보 확장 모듈 초기화 완료")
 
 # ============================================================================
 # Phase 1: Pydantic 모델
@@ -2081,10 +2084,27 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
         except Exception as pdf_error:
             logger.warning(f"PDF 생성 실패: {pdf_error}")
 
+        # 확장 정보 수집 (WHOIS, DNS, SSL, 기술 스택 등)
+        enrichment_data = {}
+        try:
+            enrichment_data = enricher.enrich_url(request.url)
+            logger.info(f"✅ 확장 정보 수집 완료: {request.url}")
+        except Exception as enrich_error:
+            logger.warning(f"확장 정보 수집 실패: {enrich_error}")
+
         # 분석 결과 요약 생성
         summary = f"URL: {request.url}"
         if "metadata" in result and "title" in result["metadata"]:
             summary += f" | 제목: {result['metadata']['title']}"
+
+        # 기술 스택 추가
+        if enrichment_data and enrichment_data.get('technologies', {}).get('success'):
+            tech_data = enrichment_data['technologies']['data']
+            all_techs = []
+            for techs in tech_data.values():
+                all_techs.extend(techs)
+            if all_techs:
+                summary += f" | 기술: {', '.join(all_techs[:3])}"
 
         # 중요 정보 추출
         sensitive_info = {}
@@ -2097,6 +2117,61 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
             if "social_media" in entities:
                 sensitive_info["social_media"] = entities["social_media"]
 
+        # Enrichment 정보를 sensitive_info에 추가
+        if enrichment_data:
+            # WHOIS 정보
+            if enrichment_data.get('whois', {}).get('success'):
+                whois_data = enrichment_data['whois']['data']
+                sensitive_info["whois"] = {
+                    "registrar": whois_data.get('registrar'),
+                    "creation_date": whois_data.get('creation_date'),
+                    "expiration_date": whois_data.get('expiration_date'),
+                    "registrant_org": whois_data.get('registrant_org'),
+                    "registrant_country": whois_data.get('registrant_country'),
+                    "name_servers": whois_data.get('name_servers', [])
+                }
+
+            # DNS 정보
+            if enrichment_data.get('dns', {}).get('success'):
+                dns_data = enrichment_data['dns']['data']
+                sensitive_info["dns"] = {
+                    "ipv4": dns_data.get('A', []),
+                    "ipv6": dns_data.get('AAAA', []),
+                    "mx_records": dns_data.get('MX', []),
+                    "txt_records": dns_data.get('TXT', [])
+                }
+
+            # SSL 정보
+            if enrichment_data.get('ssl', {}).get('success'):
+                ssl_data = enrichment_data['ssl']['data']
+                sensitive_info["ssl"] = {
+                    "issuer": ssl_data.get('issuer', {}).get('organizationName'),
+                    "subject": ssl_data.get('subject', {}),
+                    "not_before": ssl_data.get('not_before'),
+                    "not_after": ssl_data.get('not_after'),
+                    "protocol": ssl_data.get('protocol')
+                }
+
+            # 기술 스택
+            if enrichment_data.get('technologies', {}).get('success'):
+                tech_data = enrichment_data['technologies']['data']
+                sensitive_info["technologies"] = tech_data
+
+            # HTTP 헤더 보안 정보
+            if enrichment_data.get('headers', {}).get('success'):
+                headers_data = enrichment_data['headers']['data']
+                sensitive_info["security"] = {
+                    "server": headers_data.get('server'),
+                    "powered_by": headers_data.get('powered_by'),
+                    "security_headers": headers_data.get('security_headers', {})
+                }
+
+        # 확장 메타데이터 생성
+        extended_metadata = {
+            **result,
+            "enrichment": enrichment_data
+        }
+
         # 데이터베이스에 저장
         try:
             osint_db.add_record(
@@ -2107,7 +2182,7 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
                 sensitive_info=sensitive_info,
                 collection_method="analyze_url_playwright",
                 threat_level="unknown",
-                metadata=result
+                metadata=extended_metadata
             )
         except Exception as db_error:
             logger.warning(f"DB 저장 실패: {db_error}")
@@ -2115,6 +2190,7 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
         return json.dumps(
             {
                 **result,
+                "enrichment": enrichment_data,
                 "execution_time_ms": int(execution_time),
                 "saved_to_db": True,
                 "pdf_path": pdf_path

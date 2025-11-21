@@ -131,5 +131,138 @@
         }
       ]
     }
+  },
+  {
+    "timestamp": "2025-11-21T20:36:29.016985",
+    "target": "minseolee",
+    "url": "https://github.com/minseolee",
+    "pdf_path": "",
+    "summary": "Sherlock 사용자명 검색: minseolee | 발견된 사이트: GitHub, Twitter, Instagram",
+    "sensitive_info": {
+      "found_sites": [
+        "GitHub",
+        "Twitter",
+        "Instagram"
+      ],
+      "urls": [
+        "https://github.com/minseolee",
+        "https://twitter.com/minseolee",
+        "https://instagram.com/minseolee"
+      ]
+    },
+    "collection_method": "search_username_sherlock",
+    "threat_level": "unknown",
+    "metadata": {
+      "total_sites_checked": 500,
+      "found_accounts": 3
+    }
+  },
+  {
+    "timestamp": "2025-11-21T20:36:29.017298",
+    "target": "minseolee",
+    "url": "https://github.com/minseolee",
+    "pdf_path": "./pdfs/github_minseolee_20250121.pdf",
+    "summary": "GitHub 프로필 분석: minseolee | 공개 레포지토리: 15개",
+    "sensitive_info": {
+      "emails": [
+        "minseolee@example.com"
+      ],
+      "social_media": [
+        "https://twitter.com/minseolee"
+      ],
+      "repositories": [
+        "osint-tools",
+        "web-crawler",
+        "data-analyzer"
+      ]
+    },
+    "collection_method": "analyze_url_playwright",
+    "threat_level": "safe",
+    "metadata": {
+      "profile": {
+        "name": "Minseo Lee",
+        "bio": "Security Researcher & Developer",
+        "location": "Seoul, South Korea",
+        "public_repos": 15,
+        "followers": 234,
+        "following": 89
+      },
+      "page_title": "minseolee - GitHub"
+    }
+  },
+  {
+    "timestamp": "2025-11-21T20:36:29.017384",
+    "target": "minseolee.com",
+    "url": "https://minseolee.com",
+    "pdf_path": "",
+    "summary": "VirusTotal 도메인 조회: minseolee.com | 악성: 0, 의심: 0",
+    "sensitive_info": {},
+    "collection_method": "check_virustotal_domain",
+    "threat_level": "safe",
+    "metadata": {
+      "stats": {
+        "malicious": 0,
+        "suspicious": 0,
+        "undetected": 85,
+        "harmless": 10
+      },
+      "reputation": 95,
+      "categories": [
+        "personal",
+        "blog"
+      ]
+    }
+  },
+  {
+    "timestamp": "2025-11-21T20:36:29.017450",
+    "target": "minseolee.com",
+    "url": "https://minseolee.com",
+    "pdf_path": "./pdfs/minseolee_com_20250121.pdf",
+    "summary": "URL 크롤링: minseolee.com | 방문 페이지: 5개",
+    "sensitive_info": {
+      "emails": [
+        "contact@minseolee.com",
+        "minseolee@gmail.com"
+      ],
+      "phones": [
+        "+82-10-1234-5678"
+      ],
+      "social_media": [
+        "https://github.com/minseolee",
+        "https://twitter.com/minseolee",
+        "https://linkedin.com/in/minseolee"
+      ]
+    },
+    "collection_method": "crawl_and_analyze_url",
+    "threat_level": "safe",
+    "metadata": {
+      "summary": {
+        "total_pages": 5,
+        "total_links": 42,
+        "crawl_depth": 2
+      },
+      "pages": [
+        {
+          "url": "https://minseolee.com",
+          "title": "Home"
+        },
+        {
+          "url": "https://minseolee.com/about",
+          "title": "About"
+        },
+        {
+          "url": "https://minseolee.com/projects",
+          "title": "Projects"
+        },
+        {
+          "url": "https://minseolee.com/blog",
+          "title": "Blog"
+        },
+        {
+          "url": "https://minseolee.com/contact",
+          "title": "Contact"
+        }
+      ]
+    }
   }
 ]

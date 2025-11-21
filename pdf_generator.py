@@ -21,15 +21,8 @@ class PDFGenerator:
             output_dir: PDF 파일을 저장할 디렉토리
         """
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
-        self.browser: Optional[Browser] = None
-
-    async def _get_browser(self) -> Browser:
-        """브라우저 인스턴스 가져오기 (재사용)"""
-        if self.browser is None:
-            playwright = await async_playwright().start()
-            self.browser = await playwright.chromium.launch(headless=True)
-        return self.browser
+        self.output_dir.mkdir(exist_ok=True, parents=True)
+        print(f"📁 PDF 저장 디렉토리: {self.output_dir.absolute()}")
 
     def _generate_filename(self, url: str, prefix: str = "") -> str:
         """
@@ -75,47 +68,57 @@ class PDFGenerator:
         Returns:
             생성된 PDF 파일의 경로
         """
+        # 파일명 생성
+        if filename is None:
+            filename = self._generate_filename(url)
+
+        # 전체 경로
+        pdf_path = self.output_dir / filename
+
         try:
-            browser = await self._get_browser()
-            page = await browser.new_page()
+            # Playwright context manager 사용 (매번 새로 시작)
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
 
-            # 페이지 로드
-            await page.goto(url, wait_until="networkidle", timeout=wait_timeout)
-
-            # 특정 요소 대기 (선택적)
-            if wait_for_selector:
                 try:
-                    await page.wait_for_selector(wait_for_selector, timeout=wait_timeout)
-                except Exception as e:
-                    print(f"⚠️  셀렉터 대기 실패: {e}")
+                    # 페이지 로드
+                    await page.goto(url, wait_until="networkidle", timeout=wait_timeout)
 
-            # 파일명 생성
-            if filename is None:
-                filename = self._generate_filename(url)
+                    # 특정 요소 대기 (선택적)
+                    if wait_for_selector:
+                        try:
+                            await page.wait_for_selector(wait_for_selector, timeout=wait_timeout)
+                        except Exception as e:
+                            print(f"⚠️  셀렉터 대기 실패: {e}")
 
-            # 전체 경로
-            pdf_path = self.output_dir / filename
+                    # PDF 생성
+                    await page.pdf(
+                        path=str(pdf_path),
+                        format="A4",
+                        print_background=True,
+                        margin={
+                            "top": "1cm",
+                            "right": "1cm",
+                            "bottom": "1cm",
+                            "left": "1cm"
+                        }
+                    )
 
-            # PDF 생성
-            await page.pdf(
-                path=str(pdf_path),
-                format="A4",
-                print_background=True,
-                margin={
-                    "top": "1cm",
-                    "right": "1cm",
-                    "bottom": "1cm",
-                    "left": "1cm"
-                }
-            )
+                    print(f"✅ PDF 생성 완료: {pdf_path}")
 
-            await page.close()
+                finally:
+                    await page.close()
+                    await browser.close()
 
-            print(f"✅ PDF 생성 완료: {pdf_path}")
-            return str(pdf_path)
+            # 절대 경로 반환
+            return str(pdf_path.absolute())
 
         except Exception as e:
-            print(f"❌ PDF 생성 실패: {e}")
+            print(f"❌ PDF 생성 실패 ({url}): {e}")
+            # 빈 파일이 생성되었다면 삭제
+            if pdf_path.exists() and pdf_path.stat().st_size == 0:
+                pdf_path.unlink()
             raise
 
     async def html_to_pdf(
@@ -133,48 +136,52 @@ class PDFGenerator:
         Returns:
             생성된 PDF 파일의 경로
         """
+        # 파일명 생성
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"html_{timestamp}.pdf"
+
+        # 전체 경로
+        pdf_path = self.output_dir / filename
+
         try:
-            browser = await self._get_browser()
-            page = await browser.new_page()
+            # Playwright context manager 사용
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
 
-            # HTML 콘텐츠 설정
-            await page.set_content(html_content)
+                try:
+                    # HTML 콘텐츠 설정
+                    await page.set_content(html_content)
 
-            # 파일명 생성
-            if filename is None:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"html_{timestamp}.pdf"
+                    # PDF 생성
+                    await page.pdf(
+                        path=str(pdf_path),
+                        format="A4",
+                        print_background=True,
+                        margin={
+                            "top": "1cm",
+                            "right": "1cm",
+                            "bottom": "1cm",
+                            "left": "1cm"
+                        }
+                    )
 
-            # 전체 경로
-            pdf_path = self.output_dir / filename
+                    print(f"✅ PDF 생성 완료: {pdf_path}")
 
-            # PDF 생성
-            await page.pdf(
-                path=str(pdf_path),
-                format="A4",
-                print_background=True,
-                margin={
-                    "top": "1cm",
-                    "right": "1cm",
-                    "bottom": "1cm",
-                    "left": "1cm"
-                }
-            )
+                finally:
+                    await page.close()
+                    await browser.close()
 
-            await page.close()
-
-            print(f"✅ PDF 생성 완료: {pdf_path}")
-            return str(pdf_path)
+            # 절대 경로 반환
+            return str(pdf_path.absolute())
 
         except Exception as e:
             print(f"❌ PDF 생성 실패: {e}")
+            # 빈 파일이 생성되었다면 삭제
+            if pdf_path.exists() and pdf_path.stat().st_size == 0:
+                pdf_path.unlink()
             raise
-
-    async def close(self):
-        """브라우저 종료"""
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
 
 
 # 동기 래퍼 함수 (편의를 위한)
@@ -198,11 +205,8 @@ def generate_pdf_from_url(
     """
     async def _generate():
         generator = PDFGenerator(output_dir)
-        try:
-            pdf_path = await generator.url_to_pdf(url, filename, wait_for_selector)
-            return pdf_path
-        finally:
-            await generator.close()
+        pdf_path = await generator.url_to_pdf(url, filename, wait_for_selector)
+        return pdf_path
 
     return asyncio.run(_generate())
 
@@ -225,11 +229,8 @@ def generate_pdf_from_html(
     """
     async def _generate():
         generator = PDFGenerator(output_dir)
-        try:
-            pdf_path = await generator.html_to_pdf(html_content, filename)
-            return pdf_path
-        finally:
-            await generator.close()
+        pdf_path = await generator.html_to_pdf(html_content, filename)
+        return pdf_path
 
     return asyncio.run(_generate())
 

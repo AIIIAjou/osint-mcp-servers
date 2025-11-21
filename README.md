@@ -1,8 +1,16 @@
-# OSINT MCP Servers
+# 🔍 Enhanced OSINT Dashboard
 
 AI를 활용한 인텔리전스 위협 탐지 자동화 프로젝트
 
 LLM이 MCP(Model Context Protocol)를 통해 OSINT(Open Source Intelligence) 작업을 수행하고, 수집된 정보를 자동으로 데이터베이스화하여 웹 대시보드로 시각화합니다.
+
+## ✨ 새로운 기능
+
+- ✅ **풍부한 데이터 수집**: WHOIS, DNS, SSL, 기술 스택, 보안 헤더 등
+- ✅ **웹 LLM 채팅**: Ollama 통합으로 웹에서 바로 질문 가능
+- ✅ **향상된 UI**: 깔끔한 디자인, 스크롤 없는 레이아웃
+- ✅ **PDF 스냅샷**: 모든 웹페이지를 PDF로 저장 (증거 보존)
+- ✅ **자동 DB 저장**: 모든 수집 정보가 자동으로 저장됨
 
 ## 🚀 주요 기능
 
@@ -69,15 +77,58 @@ HARVESTER_API_KEY=your_harvester_api_key
 DEBUG_MODE=false
 ```
 
-## 🎯 사용 방법
+## ⚡ 빠른 시작
 
-### 1. MCP 서버 실행
+### 1. Ollama 설치 및 실행
 
 ```bash
-python server_stdio.py
+# macOS
+brew install ollama
+
+# 모델 다운로드
+ollama pull llama3.2
+
+# Ollama 서버 시작
+ollama serve
 ```
 
-이 서버는 Claude Desktop과 통합되어 LLM이 OSINT 도구를 사용할 수 있게 합니다.
+### 2. 프로젝트 설정
+
+```bash
+# 패키지 설치
+pip install -r requirements.txt
+python -m playwright install chromium
+
+# 테스트 데이터 생성 (선택사항)
+python test_integration.py
+```
+
+### 3. 웹 대시보드 시작
+
+```bash
+./start_enhanced.sh
+```
+
+### 4. 브라우저 열기
+
+```
+http://localhost:8000
+```
+
+## 🎯 사용 방법
+
+### 방법 1: Enhanced 웹 대시보드 (권장)
+
+```bash
+./start_enhanced.sh
+```
+
+- 📊 실시간 대시보드
+- 💬 LLM 채팅 (Ollama)
+- 🔍 데이터 검색 및 필터링
+- 📄 PDF 다운로드
+
+### 방법 2: Claude Desktop (MCP)
 
 **Claude Desktop 설정 (`claude_desktop_config.json`)**:
 
@@ -86,19 +137,18 @@ python server_stdio.py
   "mcpServers": {
     "osint": {
       "command": "python",
-      "args": ["/path/to/osint-mcp-servers/server_stdio.py"]
+      "args": ["/절대경로/osint-mcp-servers/server_stdio.py"]
     }
   }
 }
 ```
 
-### 2. 웹 대시보드 실행
-
-```bash
-python web_interface.py
+Claude Desktop에서:
+```
+"example.com을 조사해줘"
 ```
 
-웹 브라우저에서 http://localhost:8000 접속
+→ 자동으로 DB에 저장됨!
 
 ### 3. Claude에게 OSINT 작업 요청
 
