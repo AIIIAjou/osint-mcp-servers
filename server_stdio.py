@@ -272,7 +272,12 @@ class SherlockClient:
 
         try:
             # Sherlock 절대 경로 찾기
-            sherlock_path = shutil.which("sherlock")
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            sherlock_path = os.path.join(current_dir, "venv", "bin", "sherlock")
+            
+            if not os.path.exists(sherlock_path):
+                sherlock_path = shutil.which("sherlock")
+            
             if not sherlock_path:
                 raise FileNotFoundError(
                     "Sherlock이 설치되지 않았습니다. 'pip install sherlock-project' 실행하세요."

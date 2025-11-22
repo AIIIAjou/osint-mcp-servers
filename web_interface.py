@@ -6,13 +6,308 @@ FastAPI를 사용하여 수집된 OSINT 정보를 시각화하고 관리합니�
 import os
 from typing import Optional, List
 from datetime import datetime
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from db_manager import OSINTDatabase
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+import asyncio
+import json
+
+# 경고 메시지 제어
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="langchain_core._api.deprecation")
+
+# LangChain 및 Agent 관련 라이브러리
+try:
+    from langchain_ollama import ChatOllama
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.tools import tool
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+    HAS_LLM = True
+except ImportError as e:
+    HAS_LLM = False
+    print(f"⚠️ LangChain/Ollama 라이브러리 로드 실패: {e}")
+    import traceback
+    traceback.print_exc()
+    print("⚠️ 챗봇 기능이 제한됩니다.")
+
+from dotenv import load_dotenv
+
+# .env 파일 로드
+current_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(current_dir, ".env"))
+
+# API 키 로드
+INTELX_API_KEY = os.getenv("INTELX_API_KEY", "")
+VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
+SHODAN_API_KEY = os.getenv("SHODAN_API_KEY", "")
+
+# OSINT 도구 클래스 직접 구현 (server_stdio.py 의존성 제거)
+HAS_TOOLS = True
+
+class SherlockClient:
+    """Sherlock 래퍼 (간소화 버전)"""
+    def __init__(self):
+        # sherlock 라이브러리 임포트 시도하지 않음 (CLI 사용 권장)
+        pass
+
+    async def search(self, username: str, sites: List[str] = None):
+        # subprocess로 sherlock 실행 (가장 확실한 방법)
+        try:
+            # 주요 사이트만 빠르게 검색
+            # sherlock 명령어가 PATH에 있는지 확인 필요하지만, 
+            # venv 내부라면 'sherlock' 또는 'python -m sherlock' 시도
+            
+            cmd = ["sherlock", username, "--timeout", "5", "--print-found"]
+            if sites:
+                for site in sites:
+                    cmd.extend(["--site", site])
+            
+            # 1차 시도: sherlock 명령어 직접 실행
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            except FileNotFoundError:
+                # 2차 시도: python -m sherlock 실행
+                cmd = ["python3", "-m", "sherlock", username, "--timeout", "5", "--print-found"]
+                if sites:
+                    for site in sites:
+                        cmd.extend(["--site", site])
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+
+            stdout, stderr = await process.communicate()
+            
+            # Sherlock이 생성한 txt 파일 삭제 (파일명은 username.txt)
+            txt_file = f"{username}.txt"
+            if os.path.exists(txt_file):
+                try:
+                    os.remove(txt_file)
+                except Exception:
+                    pass
+
+            output = stdout.decode()
+            found_sites = []
+            for line in output.splitlines():
+                # Sherlock 출력 파싱 개선
+                if "[+]" in line:
+                    parts = line.split(": ")
+                    if len(parts) >= 2:
+                        found_sites.append({"site": parts[0].replace("[+]", "").strip(), "url": parts[1].strip()})
+                # 일반적인 URL 형식 파싱 (https://...)
+                elif "https://" in line and username in line:
+                     found_sites.append({"site": "Unknown", "url": line.strip()})
+            
+            if not found_sites and "Error" in output:
+                 return {"error": f"Sherlock 실행 오류: {output}"}
+
+            return {"found": found_sites, "count": len(found_sites)}
+            
+        except Exception as e:
+            return {"error": f"Sherlock 실행 실패: {str(e)}"}
+
+class VirusTotalClient:
+    """VirusTotal API 클라이언트"""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://www.virustotal.com/api/v3"
+        self.headers = {"x-apikey": api_key}
+
+    async def get_domain_report(self, domain: str):
+        if not self.api_key:
+            return {"error": "VirusTotal API 키가 설정되지 않았습니다."}
+        
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            url = f"{self.base_url}/domains/{domain}"
+            async with session.get(url, headers=self.headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+                    return {"domain": domain, "stats": stats}
+                return {"error": f"API Error: {response.status}"}
+
+    async def get_ip_report(self, ip: str):
+        if not self.api_key:
+            return {"error": "VirusTotal API 키가 설정되지 않았습니다."}
+            
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            url = f"{self.base_url}/ip_addresses/{ip}"
+            async with session.get(url, headers=self.headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+                    return {"ip": ip, "stats": stats}
+                return {"error": f"API Error: {response.status}"}
+
+class PlaywrightClient:
+    """Playwright 웹 분석 클라이언트"""
+    async def analyze_url(self, url: str):
+        from playwright.async_api import async_playwright
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                title = await page.title()
+                content = await page.content()
+                
+                # 텍스트 추출 (간단히)
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(content, "html.parser")
+                text = soup.get_text(separator=" ", strip=True)[:1000] # 앞부분 1000자만
+                
+                await browser.close()
+                return {"url": url, "title": title, "text_summary": text + "..."}
+        except Exception as e:
+            return {"error": f"Playwright 분석 실패: {str(e)}"}
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+# ============================================================================
+# LangChain 도구 정의
+# ============================================================================
+
+@tool
+async def search_username(username: str) -> str:
+    """
+    Sherlock을 사용하여 여러 소셜 미디어 사이트에서 사용자명(username)을 검색합니다.
+    특정 인물의 SNS 계정을 찾을 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+    
+    client = SherlockClient()
+    # 시간 관계상 주요 사이트만 검색
+    sites = ["github", "twitter", "instagram", "facebook", "linkedin", "tinder"]
+    result = await client.search(username, sites=sites)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def check_domain_reputation(domain: str) -> str:
+    """
+    VirusTotal을 사용하여 도메인의 보안 평판(악성 여부)을 확인합니다.
+    웹사이트가 안전한지, 피싱 사이트인지 확인할 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = VirusTotalClient(VIRUSTOTAL_API_KEY)
+    result = await client.get_domain_report(domain)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def check_ip_reputation(ip: str) -> str:
+    """
+    VirusTotal을 사용하여 IP 주소의 보안 평판을 확인합니다.
+    서버 위치, 악성 활동 연관성 등을 확인할 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = VirusTotalClient(VIRUSTOTAL_API_KEY)
+    result = await client.get_ip_report(ip)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def analyze_webpage(url: str) -> str:
+    """
+    Playwright를 사용하여 웹페이지에 직접 접속해 텍스트와 정보를 추출합니다.
+    웹사이트의 내용을 자세히 파악하거나 요약할 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = PlaywrightClient()
+    result = await client.analyze_url(url)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def search_leaks(term: str) -> str:
+    """
+    Intelligence X를 사용하여 이메일, 도메인 등의 유출 정보를 검색합니다.
+    다크웹이나 해킹된 데이터베이스에 정보가 있는지 확인할 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+    
+    # Intelligence X는 구현이 복잡하므로 여기서는 Mock 또는 간단한 메시지 반환
+    # 실제 구현 필요 시 별도 라이브러리 사용
+    return json.dumps({"message": "Intelligence X 기능은 현재 API 키 설정이 필요합니다."}, ensure_ascii=False)
+
+@tool
+async def search_local_db(query: str) -> str:
+    """
+    로컬 데이터베이스(db.csv)에 저장된 과거 수집 기록을 검색합니다.
+    이미 조사한 적이 있는 타겟인지, 과거 기록이 있는지 확인할 때 사용합니다.
+    """
+    records = db.get_all_records()
+    results = []
+    query = query.lower()
+    
+    for r in records:
+        # 타겟, URL, 요약 내용에서 검색
+        if (query in r['target'].lower() or 
+            query in r['url'].lower() or 
+            query in r['summary'].lower()):
+            results.append({
+                "timestamp": r['timestamp'],
+                "target": r['target'],
+                "method": r['collection_method'],
+                "summary": r['summary'],
+                "threat": r['threat_level']
+            })
+    
+    if not results:
+        return "데이터베이스에서 관련 기록을 찾을 수 없습니다."
+        
+    return json.dumps(results, ensure_ascii=False, indent=2)
+
+@tool
+async def save_to_db(target: str, summary: str, method: str, threat_level: str = "unknown") -> str:
+    """
+    조사 결과(정보)를 데이터베이스에 저장합니다.
+    새로운 유의미한 정보를 발견했을 때 반드시 이 도구를 사용하여 기록을 남겨야 합니다.
+    
+    Args:
+        target: 조사 대상 (예: username, domain, IP)
+        summary: 발견된 정보 요약 (한글로 작성)
+        method: 사용한 도구 이름 (예: search_username, check_domain_reputation)
+        threat_level: 위협 수준 (safe, suspicious, malicious, unknown 중 하나)
+    """
+    try:
+        success = db.add_record(
+            target=target,
+            summary=summary,
+            collection_method=method,
+            threat_level=threat_level,
+            metadata={"source": "AI Chatbot Agent"}
+        )
+        if success:
+            return "데이터베이스에 성공적으로 저장되었습니다."
+        else:
+            return "저장에 실패했습니다."
+    except Exception as e:
+        return f"저장 중 오류 발생: {str(e)}"
+
+# 사용 가능한 도구 목록
+tools = [search_username, check_domain_reputation, check_ip_reputation, analyze_webpage, search_leaks, search_local_db, save_to_db]
+
 
 
 # FastAPI 앱 생성
@@ -379,6 +674,131 @@ async def root():
                 padding: 10px;
             }
         }
+
+        /* 챗봇 위젯 스타일 */
+        .chat-widget-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            background: #667eea;
+            border-radius: 50%;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.3s;
+            z-index: 1000;
+        }
+
+        .chat-widget-btn:hover {
+            transform: scale(1.1);
+        }
+
+        .chat-icon {
+            font-size: 30px;
+            color: white;
+        }
+
+        .chat-window {
+            position: fixed;
+            bottom: 100px;
+            right: 30px;
+            width: 380px;
+            height: 500px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            display: none;
+            flex-direction: column;
+            z-index: 1000;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: #667eea;
+            color: white;
+            padding: 15px 20px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 15px;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        .message.user {
+            background: #667eea;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 2px;
+        }
+
+        .message.ai {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            margin-right: auto;
+            border-bottom-left-radius: 2px;
+        }
+
+        .chat-input-area {
+            padding: 15px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input-area input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            outline: none;
+        }
+
+        .chat-input-area button {
+            background: #667eea;
+            color: white;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .tool-status {
+            font-size: 0.8em;
+            color: #666;
+            margin: 5px 0;
+            padding: 5px 10px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            border-left: 3px solid #667eea;
+            animation: fadeIn 0.5s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body>
@@ -444,6 +864,27 @@ async def root():
         <div class="modal-content">
             <span class="modal-close" onclick="closeModal()">&times;</span>
             <div id="detail-content"></div>
+        </div>
+    </div>
+
+    <!-- 챗봇 위젯 -->
+    <div class="chat-widget-btn" onclick="toggleChat()">
+        <span class="chat-icon">🤖</span>
+    </div>
+
+    <div class="chat-window" id="chat-window">
+        <div class="chat-header">
+            <span>OSINT AI Assistant</span>
+            <span style="cursor:pointer" onclick="toggleChat()">✕</span>
+        </div>
+        <div class="chat-messages" id="chat-messages">
+            <div class="message ai">
+                안녕하세요! 수집된 데이터를 바탕으로 무엇이든 물어보세요.
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="질문을 입력하세요..." onkeypress="handleKeyPress(event)">
+            <button onclick="sendMessage()">➤</button>
         </div>
     </div>
 
@@ -640,6 +1081,123 @@ async def root():
             loadStats();
             loadRecords();
         }, 30000);
+
+        // 챗봇 관련 스크립트 (WebSocket 적용)
+        let ws = null;
+        let currentAiMessageId = null;
+
+        function toggleChat() {
+            const chatWindow = document.getElementById('chat-window');
+            if (chatWindow.style.display === 'none' || chatWindow.style.display === '') {
+                chatWindow.style.display = 'flex';
+                connectWebSocket(); // 채팅창 열 때 연결
+            } else {
+                chatWindow.style.display = 'none';
+            }
+        }
+
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/chat`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleWsMessage(data);
+            };
+
+            ws.onclose = function() {
+                // 연결 끊기면 잠시 후 재연결 시도
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        function handleWsMessage(data) {
+            const container = document.getElementById('chat-messages');
+            
+            if (data.type === 'start') {
+                // AI 응답 시작
+                currentAiMessageId = addMessage('', 'ai', true);
+            } else if (data.type === 'answer') {
+                // AI 답변 텍스트 추가
+                const el = document.getElementById(currentAiMessageId);
+                if (el) {
+                    el.textContent = data.content; // 단순 텍스트 교체 (스트리밍이라면 += 사용)
+                    el.id = ''; // 로딩 상태 해제
+                    currentAiMessageId = null;
+                } else {
+                    addMessage(data.content, 'ai');
+                }
+            } else if (data.type === 'tool_start') {
+                // 도구 실행 알림
+                const div = document.createElement('div');
+                div.className = 'tool-status';
+                div.innerHTML = `🛠️ <strong>${data.tool}</strong> 실행 중...<br><small>${data.args}</small>`;
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+            } else if (data.type === 'tool_end') {
+                // 도구 실행 완료
+                const div = document.createElement('div');
+                div.className = 'tool-status';
+                div.style.borderLeftColor = '#28a745';
+                div.innerHTML = `✅ <strong>${data.tool}</strong> 완료<br><small>${data.result}</small>`;
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+            } else if (data.type === 'error') {
+                addMessage(`❌ 오류: ${data.content}`, 'ai');
+            } else if (data.type === 'done') {
+                // 완료 처리
+                currentAiMessageId = null;
+            }
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message) return;
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('서버와 연결되지 않았습니다. 잠시 후 다시 시도해주세요.');
+                connectWebSocket();
+                return;
+            }
+
+            // 사용자 메시지 표시
+            addMessage(message, 'user');
+            input.value = '';
+
+            // 서버로 전송
+            ws.send(JSON.stringify({ message: message }));
+        }
+
+        function addMessage(text, type, isLoading = false) {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            if (isLoading) {
+                div.id = 'ai-msg-' + Date.now();
+                div.textContent = '분석 중...';
+            } else {
+                div.textContent = text;
+            }
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return div.id;
+        }
+
+        function removeMessage(id) {
+            if(id) {
+                const el = document.getElementById(id);
+                if(el) el.remove();
+            }
+        }
     </script>
 </body>
 </html>
@@ -701,6 +1259,214 @@ async def export_database():
         media_type="application/json",
         filename=output_path
     )
+
+
+# ============================================================================
+# WebSocket 채팅 엔드포인트 (Streaming + Memory)
+# ============================================================================
+
+# 간단한 인메모리 세션 저장소 (실제 프로덕션에서는 Redis 등을 권장)
+chat_sessions: Dict[int, List[Any]] = {}
+
+@app.websocket("/ws/chat")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    
+    # 세션 ID 생성 (간단히 메모리 주소 사용하거나 UUID 사용 가능)
+    session_id = id(websocket)
+    chat_sessions[session_id] = []
+    
+    if not HAS_LLM:
+        await websocket.send_json({"type": "error", "content": "서버에 LLM 라이브러리가 설치되어 있지 않습니다."})
+        await websocket.close()
+        return
+
+    try:
+        # 시스템 프롬프트 (최초 1회 설정)
+        system_prompt = SystemMessage(content="""너는 OSINT(공개출처정보) 분석 전문가 AI Agent야.
+
+[핵심 지침]
+1. **불필요한 도구 사용 금지**: 인사('안녕'), 일반적인 대화, 배경 지식 질문에는 절대 도구를 호출하지 말고 바로 답변해.
+2. **명확한 요청 시 도구 사용**: 사용자가 특정 타겟(IP, 도메인, ID)에 대한 조사, 검색, 분석을 '명시적으로' 요청했을 때만 도구를 사용해.
+3. **데이터 우선 확인**: 조사 요청이 오면 먼저 'search_local_db'를 사용해 수집된 데이터를 확인해.
+4. **결과 자동 저장**: 조사 도구(Sherlock 등)를 사용하여 유의미한 새로운 정보를 발견하면, 반드시 'save_to_db'를 사용하여 DB에 기록해.
+5. **한국어 답변**: 항상 친절하고 전문적인 한국어로 답변해.
+""")
+        chat_sessions[session_id].append(system_prompt)
+
+        while True:
+            # 메시지 수신
+            data = await websocket.receive_json()
+            user_message = data.get("message", "")
+            
+            if not user_message:
+                continue
+
+            # 1. 모델 설정
+            # 사용자가 요청한 Qwen3 모델 사용
+            llm = ChatOllama(model="qwen3:14b", temperature=0)
+            
+            # 2. 도구 준비
+            tool_map = {t.name: t for t in tools}
+            llm_with_tools = llm.bind_tools(tools)
+
+            # 3. 메시지 히스토리 업데이트
+            # 사용자 메시지 추가
+            chat_sessions[session_id].append(HumanMessage(content=user_message))
+            
+            # 문맥 제한 (너무 길어지면 앞부분 자르기 - 시스템 메시지는 유지)
+            if len(chat_sessions[session_id]) > 20:
+                chat_sessions[session_id] = [chat_sessions[session_id][0]] + chat_sessions[session_id][-15:]
+
+            # 4. 실행 루프 (Streaming)
+            await websocket.send_json({"type": "start", "content": "분석을 시작합니다..."})
+            
+            # 현재 턴에서 사용할 메시지 복사본 (도구 실행 결과 등은 이 턴에서만 유효할 수도 있지만, 히스토리에 남김)
+            current_messages = chat_sessions[session_id].copy()
+            
+            final_response = ""
+            for i in range(5): # 최대 5단계
+                # LLM 호출
+                ai_msg = await llm_with_tools.ainvoke(current_messages)
+                current_messages.append(ai_msg) # 대화 흐름에 AI 응답 추가
+                
+                # 도구 호출이 없는 경우 (최종 답변)
+                if not ai_msg.tool_calls:
+                    final_response = ai_msg.content
+                    # 최종 답변을 세션 히스토리에 저장
+                    chat_sessions[session_id].append(ai_msg)
+                    await websocket.send_json({"type": "answer", "content": final_response})
+                    break
+                
+                # 도구 호출 감지 및 실행
+                for tool_call in ai_msg.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    
+                    # UI에 알림
+                    await websocket.send_json({
+                        "type": "tool_start", 
+                        "tool": tool_name, 
+                        "args": str(tool_args)
+                    })
+                    
+                    # 도구 실행
+                    if tool_name in tool_map:
+                        tool_func = tool_map[tool_name]
+                        try:
+                            tool_result = await tool_func.ainvoke(tool_args)
+                        except Exception as e:
+                            tool_result = f"Error executing {tool_name}: {str(e)}"
+                    else:
+                        tool_result = f"Error: Tool {tool_name} not found"
+                    
+                    # 결과 메시지 추가
+                    tool_msg = ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"])
+                    current_messages.append(tool_msg)
+                    
+                    # UI에 결과 알림
+                    preview = str(tool_result)[:200] + "..." if len(str(tool_result)) > 200 else str(tool_result)
+                    await websocket.send_json({
+                        "type": "tool_end", 
+                        "tool": tool_name, 
+                        "result": preview
+                    })
+            
+            # 도구 실행 과정을 포함한 전체 대화를 히스토리에 반영할지, 최종 결과만 반영할지 결정
+            # 여기서는 도구 실행 과정도 문맥으로 포함 (복잡한 추론 유지)
+            chat_sessions[session_id] = current_messages
+
+            await websocket.send_json({"type": "done"})
+
+    except WebSocketDisconnect:
+        print("WebSocket disconnected")
+        if session_id in chat_sessions:
+            del chat_sessions[session_id] # 연결 끊기면 세션 삭제
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await websocket.send_json({"type": "error", "content": f"오류 발생: {str(e)}"})
+
+
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatRequest):
+    """기존 HTTP 엔드포인트 (하위 호환성 유지)"""
+    if not HAS_LLM:
+        return {"response": "서버에 LLM 라이브러리가 설치되어 있지 않습니다."}
+
+    try:
+        # 1. 모델 설정
+        llm = ChatOllama(model="qwen3:14b", temperature=0)
+        
+        # 2. DB 컨텍스트 구성
+        records = db.get_all_records()
+        recent_records = records[-5:] if len(records) > 5 else records
+        db_context = "최근 수집된 데이터:\n"
+        for r in recent_records:
+            db_context += f"- [{r['timestamp']}] {r['target']} ({r['collection_method']}): {r['threat_level']}\n"
+        if not recent_records:
+            db_context = "최근 수집된 데이터가 없습니다."
+
+        # 3. 직접 구현한 Agent 실행 루프 (LangChain AgentExecutor 대체)
+        
+        # 도구 이름과 설명 매핑
+        tool_map = {t.name: t for t in tools}
+        
+        messages = [
+            SystemMessage(content=f"""너는 OSINT(공개출처정보) 분석 전문가 AI Agent야.
+
+[핵심 지침]
+1. **불필요한 도구 사용 금지**: 인사('안녕'), 일반적인 대화, 배경 지식 질문에는 절대 도구를 호출하지 말고 바로 답변해.
+2. **명확한 요청 시 도구 사용**: 사용자가 특정 타겟(IP, 도메인, ID)에 대한 조사, 검색, 분석을 '명시적으로' 요청했을 때만 도구를 사용해.
+3. **데이터 우선 확인**: 조사 요청이 오면 먼저 아래 [수집된 데이터]에 정보가 있는지 확인해.
+4. **한국어 답변**: 항상 친절하고 전문적인 한국어로 답변해.
+
+[수집된 데이터]
+{db_context}
+"""),
+            HumanMessage(content=request.message)
+        ]
+
+        # 모델에 도구 바인딩
+        llm_with_tools = llm.bind_tools(tools)
+        
+        # 실행 루프 (최대 5회)
+        final_response = ""
+        for _ in range(5):
+            # LLM 호출
+            ai_msg = await llm_with_tools.ainvoke(messages)
+            messages.append(ai_msg)
+            
+            # 도구 호출이 없는 경우 (최종 답변)
+            if not ai_msg.tool_calls:
+                final_response = ai_msg.content
+                break
+                
+            # 도구 호출 실행
+            for tool_call in ai_msg.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                
+                # 도구 실행
+                if tool_name in tool_map:
+                    tool_func = tool_map[tool_name]
+                    try:
+                        # 비동기 도구 실행
+                        tool_result = await tool_func.ainvoke(tool_args)
+                    except Exception as e:
+                        tool_result = f"Error executing {tool_name}: {str(e)}"
+                else:
+                    tool_result = f"Error: Tool {tool_name} not found"
+                
+                # 결과 메시지 추가
+                messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"]))
+        
+        return {"response": final_response}
+        
+    except Exception as e:
+        print(f"Chat Error: {e}")
+        # 에러 발생 시 단순 RAG로 폴백하거나 에러 메시지 반환
+        return {"response": f"처리 중 오류가 발생했습니다 (도구 호출 실패 등). 다시 시도해주세요. ({str(e)})"}
 
 
 if __name__ == "__main__":
