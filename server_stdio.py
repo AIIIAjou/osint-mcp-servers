@@ -8,7 +8,7 @@ import shutil
 import base64
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
-
+import os
 from dotenv import load_dotenv
 
 try:
@@ -31,7 +31,8 @@ from pdf_generator import PDFGenerator
 # ============================================================================
 
 # .env 파일 로드
-load_dotenv()
+current_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(current_dir, ".env"))
 
 # 로깅 설정
 logging.basicConfig(
@@ -122,9 +123,7 @@ class ActionStep(BaseModel):
     )
     selector: Optional[str] = Field(None, description="CSS 셀렉터 (필요한 경우)")
     value: Optional[str] = Field(None, description="입력값 (type, fill, select에 사용)")
-    delay: Optional[int] = Field(
-        0, description="액션 실행 후 대기 시간 (밀리초)"
-    )
+    delay: Optional[int] = Field(0, description="액션 실행 후 대기 시간 (밀리초)")
     timeout: Optional[int] = Field(5000, description="액션 타임아웃 (밀리초)")
     description: Optional[str] = Field(None, description="액션 설명")
 
@@ -164,7 +163,7 @@ class PlaywrightDeepAnalyzeRequest(BaseModel):
     """재귀적 URL 분석 요청"""
 
     url: str = Field(..., description="시작 URL")
-    max_depth: int = Field(2, description="재귀 깊이 (기본값: 2)")
+    max_depth: int = Field(5, description="재귀 깊이 (기본값: 2)")
     max_urls: int = Field(20, description="최대 분석 URL 수 (기본값: 20)")
     include_external: bool = Field(
         True, description="외부 도메인 포함 여부 (기본값: True)"
@@ -938,9 +937,7 @@ class PlaywrightClient:
 
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=interaction_request.headless
-                )
+                browser = await p.chromium.launch(headless=interaction_request.headless)
                 context = await browser.new_context()
 
                 # 세션 로드
@@ -1018,7 +1015,10 @@ class PlaywrightClient:
                     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
                 # 세션 저장
-                if interaction_request.save_session and interaction_request.session_name:
+                if (
+                    interaction_request.save_session
+                    and interaction_request.session_name
+                ):
                     await self._save_session(context, interaction_request.session_name)
 
                 await browser.close()
@@ -1403,9 +1403,7 @@ class PlaywrightClient:
 
         return {"action": "unknown"}
 
-    async def _check_for_findings(
-        self, page, keywords: List[str]
-    ) -> List[str]:
+    async def _check_for_findings(self, page, keywords: List[str]) -> List[str]:
         """새로운 발견사항 확인"""
         findings = []
         html = await page.content()
@@ -1421,7 +1419,9 @@ class PlaywrightClient:
         # 이메일 찾기
         import re
 
-        emails = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
+        emails = re.findall(
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text
+        )
         if emails:
             findings.append(f"Found {len(set(emails))} email addresses")
 
@@ -1515,10 +1515,17 @@ class PlaywrightClient:
                     analyzed_urls[current_url] = url_data
 
                     # 성공적으로 분석된 경우에만 하위 URL 추가
-                    if url_data["status"] == "success" and "discovered_urls" in url_data:
-                        for discovered_url in url_data["discovered_urls"][:10]:  # 최대 10개만
+                    if (
+                        url_data["status"] == "success"
+                        and "discovered_urls" in url_data
+                    ):
+                        for discovered_url in url_data["discovered_urls"][
+                            :10
+                        ]:  # 최대 10개만
                             if discovered_url not in visited:
-                                url_queue.append((discovered_url, depth + 1, current_url))
+                                url_queue.append(
+                                    (discovered_url, depth + 1, current_url)
+                                )
 
                 await browser.close()
 
@@ -2003,13 +2010,26 @@ server = FastMCP("osint-mcp-server")
 @server.tool()
 def search_intelligence_x(request: SearchRequest) -> str:
     """
-    Intelligence X에서 다크웹 및 유출 데이터를 검색합니다.
+    Intelligence X에서 다크웹 및 유출 데이터(Breaches, Pastes, Darknet 등)를 검색합니다.
+
+    사용자가 특정 이메일, 도메인, 또는 키워드에 대해 "유출 정보가 있는지 확인해줘",
+    "다크웹에서 찾아봐", "이 이메일이 유출되었는지 확인해"라고 요청했을 때 이 도구를 사용하세요.
+
+    주요 사용 사례:
+    - 이메일 주소가 데이터 유출에 포함되었는지 확인
+    - 도메인과 관련된 민감한 정보 검색
+    - 다크웹에서 특정 키워드와 관련된 정보 조사
 
     Args:
         request: 검색 요청 정보
+            - term: 검색할 셀렉터 (이메일, 도메인, IP 등)
+            - maxresults: 최대 결과 수 (기본값: 100)
+            - timeout: 타임아웃 (초, 기본값: 5)
+            - buckets: 검색할 버킷 목록 (예: 'pastes', 'breaches', 'darknet')
+            - datefrom/dateto: 날짜 범위 (YYYY-MM-DD 형식)
 
     Returns:
-        JSON 형식의 검색 결과
+        JSON 형식의 검색 결과 (유출된 레코드, 날짜, 출처 등)
     """
     try:
         start_time = time.time()
@@ -2030,17 +2050,53 @@ def search_intelligence_x(request: SearchRequest) -> str:
 
 
 @server.tool()
-def search_username_sherlock(request: SherlockSearchRequest) -> str:
+def search_username_sherlock(
+    username: str,
+    sites: Optional[list[str]] = None,
+    timeout: int = 120
+) -> str:
     """
-    Sherlock을 사용하여 사용자명을 여러 웹사이트에서 검색합니다.
+    Sherlock을 사용하여 사용자명을 700개 이상의 웹사이트에서 검색합니다.
+
+    ⭐ 사용자가 단순히 "minseolee" 같은 이름만 말했거나, "이 사람 찾아줘",
+    "SNS 확인해줘", "소셜 미디어에서 찾아"라고 요청했을 때 가장 먼저
+    이 도구를 호출해야 합니다!
+
+    이 도구는 GitHub, Twitter, Instagram, Facebook, LinkedIn, Reddit,
+    TikTok, YouTube, Pinterest, Twitch 등 다양한 플랫폼에서 해당 사용자명의
+    계정을 자동으로 찾아줍니다.
+
+    주요 사용 사례:
+    - 사용자명만 주어졌을 때 소셜 미디어 계정 찾기
+    - 특정 인물의 온라인 활동 추적
+    - 해킹된 계정이나 사기 계정 조사
+    - 사용자 프로필 수집
 
     Args:
-        request: Sherlock 검색 요청 정보
+        username: 검색할 사용자명 (예: "minseolee", "kjmkjmkj")
+        sites: 검색할 특정 사이트 목록 (예: ['github', 'twitter', 'instagram']).
+               None일 경우 모든 등록된 사이트 검색 (느릴 수 있음)
+        timeout: 타임아웃 (초, 기본값: 120초)
 
     Returns:
         JSON 형식의 검색 결과
+        {
+            "found": {
+                "github": {"url": "https://github.com/...", "status": "found"},
+                "twitter": {"url": "https://twitter.com/...", "status": "found"},
+                ...
+            },
+            "not_found": ["reddit", "instagram", ...],
+            "total_found": 5,
+            "execution_time_ms": 3500
+        }
     """
     try:
+        request = SherlockSearchRequest(
+            username=username,
+            sites=sites,
+            timeout=timeout
+        )
         start_time = time.time()
         result = sherlock_client.search(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2059,17 +2115,64 @@ def search_username_sherlock(request: SherlockSearchRequest) -> str:
 
 
 @server.tool()
-async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
+async def analyze_url_playwright(
+    url: str,
+    extract_metadata: bool = True,
+    extract_text: bool = True,
+    extract_links: bool = True,
+    screenshot: bool = False,
+    timeout: int = 30,
+    wait_for_selector: Optional[str] = None
+) -> str:
     """
-    Playwright를 사용하여 URL을 분석합니다.
+    Playwright를 사용하여 특정 URL의 페이지를 분석하고 정보를 추출합니다.
+
+    Sherlock이나 다른 도구에서 발견한 소셜 미디어 프로필 URL,
+    회사 웹사이트, 또는 특정 페이지의 상세 내용을 알고 싶을 때
+    이 도구를 사용하세요. 페이지의 메타데이터, 텍스트, 링크, 이메일,
+    전화번호, SNS 계정 등을 자동으로 추출합니다.
+
+    주요 사용 사례:
+    - GitHub/Twitter 프로필 분석
+    - 회사 웹사이트에서 연락처 정보 추출
+    - 페이지 내 숨겨진 링크 및 정보 발견
+    - 프로필 이미지, 설명, 팔로워 정보 등 추출
 
     Args:
-        request: Playwright 분석 요청 정보
+        url: 분석할 URL (예: "https://github.com/kjmkjmkj", "https://example.com")
+        extract_metadata: 메타데이터 추출 (제목, 설명, 이미지) - 기본값: True
+        extract_text: 페이지 텍스트 전체 추출 - 기본값: True
+        extract_links: 페이지 내 모든 링크 목록 추출 - 기본값: True
+        screenshot: 스크린샷 캡처 - 기본값: False (시간 소요)
+        timeout: 타임아웃 (초, 기본값: 30)
+        wait_for_selector: 특정 요소(CSS 셀렉터)가 로드될 때까지 대기
+                          (예: ".profile-card", "#username")
 
     Returns:
         JSON 형식의 분석 결과
+        {
+            "url": "...",
+            "metadata": {"title": "...", "description": "...", "image": "..."},
+            "text": "페이지의 모든 텍스트...",
+            "entities": {
+                "emails": ["contact@example.com"],
+                "phones": ["+82-1234-5678"],
+                "social_media": {"twitter": ["https://twitter.com/..."]}
+            },
+            "links": ["https://...", "..."],
+            "execution_time_ms": 3200
+        }
     """
     try:
+        request = PlaywrightAnalyzeRequest(
+            url=url,
+            extract_metadata=extract_metadata,
+            extract_text=extract_text,
+            extract_links=extract_links,
+            screenshot=screenshot,
+            timeout=timeout,
+            wait_for_selector=wait_for_selector
+        )
         start_time = time.time()
         result = await playwright_client.analyze(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2077,12 +2180,12 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
         # PDF 생성 (비동기)
         pdf_path = ""
         try:
-            pdf_path = await pdf_generator.url_to_pdf(request.url)
+            pdf_path = await pdf_generator.url_to_pdf(url)
         except Exception as pdf_error:
             logger.warning(f"PDF 생성 실패: {pdf_error}")
 
         # 분석 결과 요약 생성
-        summary = f"URL: {request.url}"
+        summary = f"URL: {url}"
         if "metadata" in result and "title" in result["metadata"]:
             summary += f" | 제목: {result['metadata']['title']}"
 
@@ -2100,14 +2203,14 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
         # 데이터베이스에 저장
         try:
             osint_db.add_record(
-                target=request.url,
-                url=request.url,
+                target=url,
+                url=url,
                 pdf_path=pdf_path,
                 summary=summary,
                 sensitive_info=sensitive_info,
                 collection_method="analyze_url_playwright",
                 threat_level="unknown",
-                metadata=result
+                metadata=result,
             )
         except Exception as db_error:
             logger.warning(f"DB 저장 실패: {db_error}")
@@ -2117,7 +2220,7 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
                 **result,
                 "execution_time_ms": int(execution_time),
                 "saved_to_db": True,
-                "pdf_path": pdf_path
+                "pdf_path": pdf_path,
             },
             indent=2,
             ensure_ascii=False,
@@ -2130,13 +2233,37 @@ async def analyze_url_playwright(request: PlaywrightAnalyzeRequest) -> str:
 @server.tool()
 def check_virustotal_domain(request: ThreatIntelRequest) -> str:
     """
-    VirusTotal에서 도메인의 위협 정보를 확인합니다.
+    VirusTotal에서 도메인의 보안 위협 정보를 확인합니다.
+
+    사용자가 특정 도메인이 안전한지, 악성 사이트는 아닌지 확인하고 싶을 때,
+    또는 웹사이트의 평판/보안 위험도를 알고 싶을 때 이 도구를 사용하세요.
+
+    주요 사용 사례:
+    - 도메인이 악성 소프트웨어를 배포하는지 확인
+    - 피싱 사이트 여부 판단
+    - 도메인의 보안 평판 조회
+    - 의심스러운 웹사이트의 위협도 분석
 
     Args:
-        request: 위협 정보 조회 요청 (query_type: 'domain' 사용)
+        request: 위협 정보 조회 요청
+            query: 조회할 도메인 (예: "example.com", "suspicious-site.xyz")
+            query_type: 반드시 'domain' 사용
+            timeout: 타임아웃 (초, 기본값: 10)
 
     Returns:
         JSON 형식의 위협 정보
+        {
+            "stats": {
+                "malicious": 0,       # 악성으로 판정한 보안사 수
+                "suspicious": 1,      # 의심으로 판정한 보안사 수
+                "undetected": 45,     # 감지하지 못한 보안사 수
+                "harmless": 50        # 무해로 판정한 보안사 수
+            },
+            "threat_level": "safe" | "suspicious" | "malicious",
+            "last_analysis_date": "2025-11-22T...",
+            "categories": {...},
+            "execution_time_ms": 1200
+        }
     """
     try:
         start_time = time.time()
@@ -2170,17 +2297,13 @@ def check_virustotal_domain(request: ThreatIntelRequest) -> str:
                 sensitive_info={},
                 collection_method="check_virustotal_domain",
                 threat_level=threat_level,
-                metadata=result
+                metadata=result,
             )
         except Exception as db_error:
             logger.warning(f"DB 저장 실패: {db_error}")
 
         return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-                "saved_to_db": True
-            },
+            {**result, "execution_time_ms": int(execution_time), "saved_to_db": True},
             indent=2,
             ensure_ascii=False,
         )
@@ -2192,13 +2315,38 @@ def check_virustotal_domain(request: ThreatIntelRequest) -> str:
 @server.tool()
 def check_virustotal_ip(request: ThreatIntelRequest) -> str:
     """
-    VirusTotal에서 IP 주소의 위협 정보를 확인합니다.
+    VirusTotal에서 IP 주소의 보안 위협 정보를 확인합니다.
+
+    사용자가 특정 IP 주소가 악의적인 활동과 연관되어 있는지 확인하고 싶을 때,
+    웹사이트를 호스팅하는 서버의 평판을 알고 싶을 때 이 도구를 사용하세요.
+
+    주요 사용 사례:
+    - 특정 IP 주소가 스팸/멀웨어 배포에 사용되는지 확인
+    - 서버의 지리적 위치 및 호스팅 정보 조회
+    - 봇네트(Botnet) 또는 C2 서버 여부 판단
+    - IP 주소의 보안 평판 조회
 
     Args:
-        request: 위협 정보 조회 요청 (query_type: 'ip' 사용)
+        request: 위협 정보 조회 요청
+            query: 조회할 IP 주소 (IPv4 또는 IPv6, 예: "192.168.1.1", "8.8.8.8")
+            query_type: 반드시 'ip' 사용
+            timeout: 타임아웃 (초, 기본값: 10)
 
     Returns:
         JSON 형식의 위협 정보
+        {
+            "stats": {
+                "malicious": 0,
+                "suspicious": 0,
+                "undetected": 50,
+                "harmless": 50
+            },
+            "threat_level": "safe" | "suspicious" | "malicious",
+            "asn": "AS16509",
+            "country": "US",
+            "last_analysis_date": "2025-11-22T...",
+            "execution_time_ms": 1500
+        }
     """
     try:
         start_time = time.time()
@@ -2232,17 +2380,13 @@ def check_virustotal_ip(request: ThreatIntelRequest) -> str:
                 sensitive_info={},
                 collection_method="check_virustotal_ip",
                 threat_level=threat_level,
-                metadata=result
+                metadata=result,
             )
         except Exception as db_error:
             logger.warning(f"DB 저장 실패: {db_error}")
 
         return json.dumps(
-            {
-                **result,
-                "execution_time_ms": int(execution_time),
-                "saved_to_db": True
-            },
+            {**result, "execution_time_ms": int(execution_time), "saved_to_db": True},
             indent=2,
             ensure_ascii=False,
         )
@@ -2252,17 +2396,79 @@ def check_virustotal_ip(request: ThreatIntelRequest) -> str:
 
 
 @server.tool()
-async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
+async def crawl_and_analyze_url(
+    url: str,
+    max_depth: int = 2,
+    max_pages: int = 10,
+    timeout: int = 60,
+    url_pattern: Optional[str] = None,
+    extract_links: bool = True,
+    extract_text: bool = True,
+    analyze_content: bool = True
+) -> str:
     """
-    Playwright를 사용하여 URL을 자동으로 크롤링하고 지능형 분석을 수행합니다.
+    Playwright를 사용하여 URL과 그 관련 페이지들을 자동으로 크롤링하고
+    종합적으로 분석합니다.
+
+    사용자가 특정 웹사이트의 모든 페이지에서 정보를 수집하고 싶을 때,
+    또는 웹사이트의 구조를 파악하면서 모든 연락처, 링크, 정보를 추출하고 싶을 때
+    이 도구를 사용하세요.
+
+    주요 사용 사례:
+    - 회사 웹사이트에서 모든 연락처 정보 추출
+    - GitHub 사용자의 모든 저장소 페이지 분석
+    - 웹사이트 전체 구조 및 숨겨진 페이지 발견
+    - 모든 소셜 미디어 링크 수집
 
     Args:
-        request: Playwright 크롤링 요청 정보
+        url: 크롤링을 시작할 URL (예: "https://github.com/kjmkjmkj")
+        max_depth: 크롤링 깊이 (기본값: 2)
+                  1 = 시작 페이지만
+                  2 = 시작 페이지 + 링크된 페이지 1단계
+                  3 = 더 깊은 탐색 (시간 소요)
+        max_pages: 최대 방문 페이지 수 (기본값: 10)
+                  보통 10-20이 적절함
+        timeout: 전체 크롤링 타임아웃 (초, 기본값: 60)
+        url_pattern: 크롤링할 URL 패턴 (정규표현식)
+                    예: ".*github.com.*" (github.com만 크롤링)
+                    None이면 모든 페이지 크롤링
+        extract_links: 모든 링크 추출 - 기본값: True
+        extract_text: 각 페이지의 텍스트 추출 - 기본값: True
+        analyze_content: 이메일, 전화번호, SNS 등 지능형 분석 - 기본값: True
 
     Returns:
         JSON 형식의 크롤링 결과
+        {
+            "pages": [
+                {
+                    "url": "https://...",
+                    "title": "...",
+                    "text": "...",
+                    "links": [...],
+                    "entities": {"emails": [...], "phones": [...]}
+                },
+                ...
+            ],
+            "summary": {
+                "total_pages": 5,
+                "total_links": 42,
+                "all_emails": ["contact@...", ...],
+                "all_phones": ["+82-..."]
+            },
+            "execution_time_ms": 15000
+        }
     """
     try:
+        request = PlaywrightCrawlRequest(
+            url=url,
+            max_depth=max_depth,
+            max_pages=max_pages,
+            timeout=timeout,
+            url_pattern=url_pattern,
+            extract_links=extract_links,
+            extract_text=extract_text,
+            analyze_content=analyze_content
+        )
         start_time = time.time()
         result = await playwright_client.crawl(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2270,12 +2476,12 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
         # PDF 생성 (첫 번째 페이지만)
         pdf_path = ""
         try:
-            pdf_path = await pdf_generator.url_to_pdf(request.url)
+            pdf_path = await pdf_generator.url_to_pdf(url)
         except Exception as pdf_error:
             logger.warning(f"PDF 생성 실패: {pdf_error}")
 
         # 크롤링 결과 요약
-        summary = f"URL 크롤링: {request.url}"
+        summary = f"URL 크롤링: {url}"
         if "summary" in result:
             crawl_summary = result["summary"]
             summary += f" | 방문 페이지: {crawl_summary.get('total_pages', 0)}개"
@@ -2297,20 +2503,20 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
         sensitive_info = {
             "emails": list(set(all_emails)),
             "phones": list(set(all_phones)),
-            "social_media": list(set(all_social))
+            "social_media": list(set(all_social)),
         }
 
         # 데이터베이스에 저장
         try:
             osint_db.add_record(
-                target=request.url,
-                url=request.url,
+                target=url,
+                url=url,
                 pdf_path=pdf_path,
                 summary=summary,
                 sensitive_info=sensitive_info,
                 collection_method="crawl_and_analyze_url",
                 threat_level="unknown",
-                metadata=result
+                metadata=result,
             )
         except Exception as db_error:
             logger.warning(f"DB 저장 실패: {db_error}")
@@ -2320,7 +2526,7 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
                 **result,
                 "execution_time_ms": int(execution_time),
                 "saved_to_db": True,
-                "pdf_path": pdf_path
+                "pdf_path": pdf_path,
             },
             indent=2,
             ensure_ascii=False,
@@ -2331,35 +2537,88 @@ async def crawl_and_analyze_url(request: PlaywrightCrawlRequest) -> str:
 
 
 @server.tool()
-async def interact_with_webpage(request: PlaywrightInteractionRequest) -> str:
+async def interact_with_webpage(
+    url: str,
+    actions: str,
+    save_session: bool = False,
+    session_name: Optional[str] = None,
+    load_session: Optional[str] = None,
+    screenshot_final: bool = True,
+    extract_data: bool = True,
+    headless: bool = True,
+    timeout: int = 60
+) -> str:
     """
-    Playwright를 사용하여 웹페이지와 동적으로 상호작용합니다.
+    Playwright를 사용하여 웹페이지와 정교하게 상호작용합니다.
 
-    버튼 클릭, 폼 입력, 스크롤, 네비게이션 등 사용자처럼 웹사이트를 조작할 수 있습니다.
-    액션 시퀀스를 정의하여 복잡한 시나리오를 자동화할 수 있습니다.
+    사용자가 특정 웹사이트에서 로그인, 검색, 필터링, 버튼 클릭 등의
+    **정확한 액션 시퀀스**를 수행해야 할 때 이 도구를 사용하세요.
+    사용자처럼 웹사이트를 조작하여 원하는 정보를 추출할 수 있습니다.
+
+    주요 사용 사례:
+    - 회원가입/로그인 후 정보 수집
+    - 검색창에 입력하고 결과 수집
+    - 동적 페이지에서 특정 요소 클릭하여 콘텐츠 로드
+    - 드롭다운 메뉴에서 옵션 선택
+    - 페이지 스크롤하며 추가 정보 로드
 
     지원되는 액션:
-    - click: 요소 클릭
+    - click: 버튼/링크 클릭
     - type/fill: 텍스트 입력
-    - press: 키 입력 (Enter, Tab 등)
+    - press: 키 입력 (Enter, Tab, Escape 등)
     - select: 드롭다운 선택
-    - scroll: 스크롤
-    - wait: 대기
-    - wait_for_selector: 요소 로드 대기
+    - scroll: 페이지 스크롤
+    - wait: 시간 대기 (밀리초)
+    - wait_for_selector: 특정 요소 로드 대기
     - screenshot: 스크린샷 캡처
-    - navigate: 페이지 이동
+    - navigate: 다른 페이지로 이동
     - hover: 마우스 오버
-    - check/uncheck: 체크박스
-    - get_text: 텍스트 가져오기
-    - get_attribute: 속성 가져오기
+    - check/uncheck: 체크박스 체크/해제
+    - get_text: 요소의 텍스트 추출
+    - get_attribute: 요소의 속성값 추출
 
     Args:
-        request: Playwright 상호작용 요청 정보
+        url: 시작 URL
+        actions: JSON 문자열로 된 액션 목록.
+                예: '[{"action": "click", "selector": "button.login"},
+                            {"action": "type", "selector": "input#email", "value": "user@example.com"},
+                            {"action": "press", "value": "Enter"}]'
+        save_session: 세션 저장 (로그인 상태 유지) - 기본값: False
+        session_name: 세션 이름 (save_session=True일 때 사용)
+        load_session: 이전에 저장한 세션 로드
+        screenshot_final: 최종 스크린샷 캡처 - 기본값: True
+        extract_data: 최종 페이지에서 텍스트/링크 추출 - 기본값: True
+        headless: 헤드리스 모드 (화면 안 보이고 실행) - 기본값: True
+        timeout: 전체 작업 타임아웃 (초, 기본값: 60)
 
     Returns:
-        JSON 형식의 실행 결과 (각 액션의 성공/실패, 최종 데이터, 스크린샷 등)
+        JSON 형식의 상세 실행 결과
+        {
+            "success": true,
+            "actions_completed": 3,
+            "failed_actions": [],
+            "final_url": "https://...",
+            "final_data": {"text": "...", "links": [...]},
+            "screenshot_path": "pdfs/...",
+            "execution_time_ms": 5000
+        }
     """
     try:
+        # JSON 문자열로 받은 actions를 파싱
+        actions_list = json.loads(actions)
+
+        request = PlaywrightInteractionRequest(
+            url=url,
+            actions=actions_list,
+            save_session=save_session,
+            session_name=session_name,
+            load_session=load_session,
+            screenshot_final=screenshot_final,
+            extract_data=extract_data,
+            headless=headless,
+            timeout=timeout
+        )
+
         start_time = time.time()
         result = await playwright_client.interact(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2378,26 +2637,72 @@ async def interact_with_webpage(request: PlaywrightInteractionRequest) -> str:
 
 
 @server.tool()
-async def auto_explore_webpage(request: PlaywrightAutoExploreRequest) -> str:
+async def auto_explore_webpage(
+    url: str,
+    goal: str,
+    max_interactions: int = 10,
+    max_pages: int = 5,
+    timeout: int = 120
+) -> str:
     """
     목표 기반 자동 웹 탐색을 수행합니다.
 
-    Agent가 목표를 이해하고 자동으로 관련 링크를 찾아 클릭하며 정보를 수집합니다.
-    키워드 기반으로 페이지를 분석하고 가장 관련성 높은 요소와 상호작용합니다.
+    사용자가 정확한 액션은 모르지만 원하는 **목표만 말할 때** 이 도구를 사용하세요.
+    LLM Agent가 자동으로 목표를 이해하고, 관련 링크를 찾아 클릭하고, 페이지를 탐색하며
+    정보를 수집합니다. "이 웹사이트에서 XXX를 찾아줘"라는 식의 모호한 요청에 적합합니다.
 
-    예시 목표:
-    - "연락처 정보 찾기"
-    - "SNS 링크 찾기"
-    - "이메일 주소 수집"
-    - "특정 키워드가 포함된 페이지 찾기"
+    예를 들어, 사용자가 "연락처 정보를 찾아줘", "SNS 링크를 찾아줘",
+    "이 회사의 CEO 정보를 찾아"라고만 말하면, Agent가 자동으로
+    페이지를 순회하며 관련 정보를 찾아줍니다.
+
+    주요 사용 사례:
+    - "연락처 정보 찾기" - Contact/About 페이지 자동 찾기
+    - "SNS 링크 찾기" - Twitter, Instagram, LinkedIn 등의 링크 자동 발견
+    - "이메일 주소 수집" - 페이지 전체에서 이메일 추출
+    - "특정 키워드 페이지 찾기" - 목표 키워드가 포함된 페이지 자동 탐색
+    - "팀 멤버 찾기" - Team/Staff 페이지 자동 탐색
 
     Args:
-        request: 자동 탐색 요청 정보 (URL, 목표, 제한사항)
+        url: 시작 URL (예: "https://example.com", "https://github.com/user")
+        goal: 명확한 탐색 목표 (자유로운 자연어로 작성)
+              예시:
+              - "이 회사의 연락처 정보를 찾아"
+              - "소셜 미디어 계정 링크를 모두 찾아"
+              - "CEO와 팀 멤버들의 정보를 수집해"
+              - "가격 정보가 있는 페이지를 찾아"
+        max_interactions: 최대 상호작용 횟수 (클릭, 스크롤 등, 기본값: 10)
+                         낮을수록 빠르지만 정보를 놓칠 수 있음
+        max_pages: 최대 방문 페이지 수 (기본값: 5)
+                  많을수록 완전한 탐색, 시간 소요 증가
+        timeout: 전체 탐색 타임아웃 (초, 기본값: 120)
 
     Returns:
-        JSON 형식의 탐색 결과 (방문한 페이지, 상호작용 내역, 발견사항)
+        JSON 형식의 탐색 결과
+        {
+            "goal": "연락처 찾기",
+            "pages_visited": ["https://...", "https://..."],
+            "interactions": [
+                {"action": "clicked Contact page", "url": "...", "found_emails": ["..."]},
+                ...
+            ],
+            "findings": {
+                "emails": ["contact@example.com"],
+                "phones": ["+82-1234-5678"],
+                "social_links": {"twitter": "https://twitter.com/..."},
+                "other_info": "..."
+            },
+            "execution_time_ms": 25000
+        }
     """
     try:
+        request = PlaywrightAutoExploreRequest(
+            url=url,
+            goal=goal,
+            max_interactions=max_interactions,
+            max_pages=max_pages,
+            timeout=timeout
+        )
+
         start_time = time.time()
         result = await playwright_client.auto_explore(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2416,7 +2721,17 @@ async def auto_explore_webpage(request: PlaywrightAutoExploreRequest) -> str:
 
 
 @server.tool()
-async def deep_analyze_urls(request: PlaywrightDeepAnalyzeRequest) -> str:
+async def deep_analyze_urls(
+    url: str,
+    max_depth: int = 5,
+    max_urls: int = 20,
+    include_external: bool = True,
+    check_threats: bool = False,
+    extract_emails: bool = True,
+    extract_phones: bool = True,
+    extract_social: bool = True,
+    timeout_per_url: int = 30
+) -> str:
     """
     재귀적 URL 분석을 수행합니다.
 
@@ -2438,7 +2753,15 @@ async def deep_analyze_urls(request: PlaywrightDeepAnalyzeRequest) -> str:
     - 웹사이트 보안 분석 (모든 링크된 도메인 위협 검사)
 
     Args:
-        request: 재귀적 분석 요청 정보
+        url: 시작 URL
+        max_depth: 재귀 깊이 (기본값: 5)
+        max_urls: 최대 분석 URL 수 (기본값: 20)
+        include_external: 외부 도메인 포함 여부 (기본값: True)
+        check_threats: VirusTotal로 위협 정보 확인 (기본값: False, 시간 소요)
+        extract_emails: 이메일 주소 추출 (기본값: True)
+        extract_phones: 전화번호 추출 (기본값: True)
+        extract_social: 소셜 미디어 링크 추출 (기본값: True)
+        timeout_per_url: URL당 타임아웃 (초, 기본값: 30)
 
     Returns:
         JSON 형식의 분석 결과:
@@ -2447,6 +2770,18 @@ async def deep_analyze_urls(request: PlaywrightDeepAnalyzeRequest) -> str:
         - summary: 통합 요약 (이메일, 전화번호, SNS, 위협 정보 등)
     """
     try:
+        request = PlaywrightDeepAnalyzeRequest(
+            url=url,
+            max_depth=max_depth,
+            max_urls=max_urls,
+            include_external=include_external,
+            check_threats=check_threats,
+            extract_emails=extract_emails,
+            extract_phones=extract_phones,
+            extract_social=extract_social,
+            timeout_per_url=timeout_per_url
+        )
+
         start_time = time.time()
         result = await playwright_client.deep_analyze(request)
         execution_time = (time.time() - start_time) * 1000
@@ -2462,6 +2797,114 @@ async def deep_analyze_urls(request: PlaywrightDeepAnalyzeRequest) -> str:
     except Exception as e:
         logger.error(f"재귀적 URL 분석 오류: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+# ============================================================================
+# Phase 6: MCP Prompts (@server.prompt() 데코레이터 사용)
+# ============================================================================
+
+
+@server.prompt()
+def investigate_username(username: str) -> str:
+    """사용자명을 기반으로 종합적인 OSINT 조사를 수행하는 프롬프트"""
+    return f"""
+당신은 OSINT 전문가입니다. '{username}'이라는 사용자에 대해 종합적인 조사를 수행해주세요.
+
+다음 단계를 순서대로 진행하세요:
+
+1. **사용자명 검색 (Sherlock 도구 사용)**
+   - 'search_username_sherlock' 도구를 사용하여 '{username}'이 활동 중인 모든 웹사이트와 소셜 미디어를 찾으세요.
+   - 특히 GitHub, Twitter, Instagram, LinkedIn, Reddit, TikTok 등 주요 플랫폼을 확인하세요.
+
+2. **발견된 프로필 분석 (Playwright 도구 사용)**
+   - 발견된 각 프로필의 URL에 대해 'analyze_url_playwright' 도구를 사용하여 상세 정보를 추출하세요.
+   - 각 프로필에서 팔로워 수, 자기소개, 위치 정보, 연락처 등을 수집하세요.
+
+3. **깊은 분석 (Deep Analyze 도구 사용)**
+   - 주요 프로필(GitHub, 웹사이트 등)이 있다면 'deep_analyze_urls' 도구를 사용하여 연결된 모든 정보를 분석하세요.
+   - 이메일, 전화번호, 연결된 다른 계정들을 수집하세요.
+
+4. **정보 종합**
+   - 수집한 모든 정보를 정리하여 다음을 포함한 종합 보고서를 작성하세요:
+     * 발견된 모든 온라인 프로필 및 플랫폼
+     * 각 프로필의 활동 수준 및 특징
+     * 추출된 연락처 정보 (이메일, 전화, 주소)
+     * 관심사 및 활동 분야
+     * 지리적 위치 정보
+     * 관계 네트워크 (팔로우, 팔로워, 협업자)
+
+최종 보고서는 구조화되고 이해하기 쉽게 작성하세요.
+"""
+
+
+@server.prompt()
+def analyze_domain_security(domain: str) -> str:
+    """도메인의 보안 위협을 종합적으로 분석하는 프롬프트"""
+    return f"""
+당신은 사이버 보안 전문가입니다. '{domain}'이라는 도메인에 대해 보안 위협을 종합적으로 분석해주세요.
+
+다음 단계를 순서대로 진행하세요:
+
+1. **도메인 평판 확인 (VirusTotal)**
+   - 'check_virustotal_domain' 도구를 사용하여 '{domain}'이 악성으로 플래그 되었는지 확인하세요.
+   - 악성/의심 판정 수를 확인하고 세부 사항을 분석하세요.
+
+2. **유출 정보 검색 (Intelligence X)**
+   - 'search_intelligence_x' 도구를 사용하여 이 도메인과 관련된 데이터 유출이 있었는지 확인하세요.
+   - 특히 "{domain}" 및 관련 이메일 주소를 검색하세요.
+
+3. **웹사이트 분석 (Playwright)**
+   - 'analyze_url_playwright' 도구를 사용하여 웹사이트의 메인 페이지를 분석하세요.
+   - SSL 인증서, 메타데이터, 숨겨진 스크립트, 외부 리소스 등을 확인하세요.
+
+4. **깊은 분석 (Deep Analyze)**
+   - 'deep_analyze_urls' 도구를 사용하여 웹사이트의 전체 구조를 분석하세요.
+   - 모든 연결된 외부 도메인도 함께 검사하세요.
+   - check_threats=true 옵션으로 모든 도메인의 위협도를 확인하세요.
+
+5. **최종 보안 등급 산정**
+   - 수집한 정보를 바탕으로 다음을 포함한 보안 평가를 작성하세요:
+     * 위협 수준 (Safe / Suspicious / Malicious)
+     * 주요 위협 요소
+     * 발견된 유출 정보
+     * 의심스러운 링크 및 리소스
+     * 권고사항
+
+결과는 구조화된 보고서 형식으로 제시하세요.
+"""
+
+
+@server.prompt()
+def collect_contact_information(website_url: str) -> str:
+    """웹사이트에서 모든 연락처 정보를 수집하는 프롬프트"""
+    return f"""
+당신은 정보 수집 전문가입니다. '{website_url}'에서 모든 연락처 정보를 수집해주세요.
+
+다음 단계를 순서대로 진행하세요:
+
+1. **웹사이트 크롤링 및 분석**
+   - 'crawl_and_analyze_url' 도구를 사용하여 웹사이트의 모든 페이지를 크롤링하세요.
+   - max_depth=2, max_pages=15로 설정하여 충분한 페이지를 방문하세요.
+
+2. **깊은 분석 및 엔티티 추출**
+   - 'deep_analyze_urls' 도구를 사용하여 모든 연락처 정보를 자동 추출하세요.
+   - extract_emails=true, extract_phones=true, extract_social=true로 설정하세요.
+
+3. **자동 탐색 (선택적)**
+   - 자동 크롤링에서 연락처 정보가 불충분하면 'auto_explore_webpage' 도구를 사용하세요.
+   - goal="이 웹사이트의 모든 연락처 정보 찾기"로 설정하여 자동 탐색하세요.
+
+4. **정보 종합 및 정리**
+   - 수집한 모든 정보를 다음과 같이 정리하세요:
+     * 이메일 주소 (모두)
+     * 전화번호 및 팩스
+     * 우편 주소
+     * 담당자 이름 및 직책
+     * SNS 계정 링크
+     * 웹사이트 내 Contact/About 페이지 URL
+
+정보는 중복 제거 후 카테고리별로 정렬하여 제시하세요.
+"""
 
 
 if __name__ == "__main__":
@@ -2488,6 +2931,15 @@ if __name__ == "__main__":
     logger.info("🔍 재귀적 URL 분석:")
     logger.info("   9. deep_analyze_urls - 재귀적 URL 분석 & 관계 매핑")
     logger.info("      (URL을 분석하고 발견된 모든 URL도 자동 분석)")
+    logger.info("")
+    logger.info("📋 MCP Prompts (사전 정의된 조사 워크플로우):")
+    logger.info("   • investigate_username - 사용자명 기반 종합 OSINT 조사")
+    logger.info("   • analyze_domain_security - 도메인 보안 위협 분석")
+    logger.info("   • collect_contact_information - 웹사이트 연락처 정보 수집")
+    logger.info("")
+    logger.info("💡 프롬프트 사용 방법:")
+    logger.info("   - 로컬 LLM(Llama, Mistral 등)의 도구 호출 능력이 약할 경우 프롬프트를 선택하세요")
+    logger.info("   - Claude는 자동으로 필요한 도구를 호출하므로 프롬프트를 명시적으로 선택할 필요 없습니다")
     logger.info("=" * 70)
 
     # STDIO 모드로 명시적 실행

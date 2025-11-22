@@ -1,5 +1,6 @@
 # Environment variables
 .env
+pdfs
 .env.local
 .env.*.local
 .claude
