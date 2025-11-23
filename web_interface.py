@@ -54,22 +54,15 @@ HAS_TOOLS = True
 class SherlockClient:
     """Sherlock 래퍼 (간소화 버전)"""
     def __init__(self):
-        # sherlock 라이브러리 임포트 시도하지 않음 (CLI 사용 권장)
         pass
 
     async def search(self, username: str, sites: List[str] = None):
-        # subprocess로 sherlock 실행 (가장 확실한 방법)
         try:
-            # 주요 사이트만 빠르게 검색
-            # sherlock 명령어가 PATH에 있는지 확인 필요하지만, 
-            # venv 내부라면 'sherlock' 또는 'python -m sherlock' 시도
-            
             cmd = ["sherlock", username, "--timeout", "5", "--print-found"]
             if sites:
                 for site in sites:
                     cmd.extend(["--site", site])
-            
-            # 1차 시도: sherlock 명령어 직접 실행
+
             try:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -77,7 +70,6 @@ class SherlockClient:
                     stderr=asyncio.subprocess.PIPE
                 )
             except FileNotFoundError:
-                # 2차 시도: python -m sherlock 실행
                 cmd = ["python3", "-m", "sherlock", username, "--timeout", "5", "--print-found"]
                 if sites:
                     for site in sites:
@@ -89,8 +81,7 @@ class SherlockClient:
                 )
 
             stdout, stderr = await process.communicate()
-            
-            # Sherlock이 생성한 txt 파일 삭제 (파일명은 username.txt)
+
             txt_file = f"{username}.txt"
             if os.path.exists(txt_file):
                 try:
@@ -101,20 +92,18 @@ class SherlockClient:
             output = stdout.decode()
             found_sites = []
             for line in output.splitlines():
-                # Sherlock 출력 파싱 개선
                 if "[+]" in line:
                     parts = line.split(": ")
                     if len(parts) >= 2:
                         found_sites.append({"site": parts[0].replace("[+]", "").strip(), "url": parts[1].strip()})
-                # 일반적인 URL 형식 파싱 (https://...)
                 elif "https://" in line and username in line:
                      found_sites.append({"site": "Unknown", "url": line.strip()})
-            
+
             if not found_sites and "Error" in output:
                  return {"error": f"Sherlock 실행 오류: {output}"}
 
             return {"found": found_sites, "count": len(found_sites)}
-            
+
         except Exception as e:
             return {"error": f"Sherlock 실행 실패: {str(e)}"}
 
@@ -128,7 +117,7 @@ class VirusTotalClient:
     async def get_domain_report(self, domain: str):
         if not self.api_key:
             return {"error": "VirusTotal API 키가 설정되지 않았습니다."}
-        
+
         import aiohttp
         async with aiohttp.ClientSession() as session:
             url = f"{self.base_url}/domains/{domain}"
@@ -142,7 +131,7 @@ class VirusTotalClient:
     async def get_ip_report(self, ip: str):
         if not self.api_key:
             return {"error": "VirusTotal API 키가 설정되지 않았습니다."}
-            
+
         import aiohttp
         async with aiohttp.ClientSession() as session:
             url = f"{self.base_url}/ip_addresses/{ip}"
@@ -154,24 +143,72 @@ class VirusTotalClient:
                 return {"error": f"API Error: {response.status}"}
 
 class PlaywrightClient:
-    """Playwright 웹 분석 클라이언트"""
-    async def analyze_url(self, url: str):
+    """Playwright 웹 분석 클라이언트 (강화 버전)"""
+    async def analyze_url(self, url: str, generate_pdf: bool = True):
         from playwright.async_api import async_playwright
+        from bs4 import BeautifulSoup
+        import re
+
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
                 await page.goto(url, wait_until="networkidle", timeout=30000)
+
                 title = await page.title()
                 content = await page.content()
-                
-                # 텍스트 추출 (간단히)
-                from bs4 import BeautifulSoup
+
                 soup = BeautifulSoup(content, "html.parser")
-                text = soup.get_text(separator=" ", strip=True)[:1000] # 앞부분 1000자만
-                
+                text = soup.get_text(separator=" ", strip=True)[:2000]
+
+                emails = list(set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', content)))
+                phones = list(set(re.findall(r'(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', content)))
+                links = [a.get('href') for a in soup.find_all('a', href=True)][:50]
+
+                social_media = []
+                social_patterns = {
+                    'twitter': r'https?://(?:www\.)?twitter\.com/[\w]+',
+                    'facebook': r'https?://(?:www\.)?facebook\.com/[\w.]+',
+                    'linkedin': r'https?://(?:www\.)?linkedin\.com/[\w/]+',
+                    'instagram': r'https?://(?:www\.)?instagram\.com/[\w.]+',
+                    'github': r'https?://(?:www\.)?github\.com/[\w-]+'
+                }
+                for platform, pattern in social_patterns.items():
+                    matches = re.findall(pattern, content)
+                    if matches:
+                        social_media.extend([{"platform": platform, "url": m} for m in matches[:5]])
+
+                meta_description = soup.find('meta', attrs={'name': 'description'})
+                meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+
+                metadata = {
+                    "description": meta_description.get('content') if meta_description else "",
+                    "keywords": meta_keywords.get('content') if meta_keywords else "",
+                    "link_count": len(links)
+                }
+
+                pdf_path = ""
+                if generate_pdf:
+                    try:
+                        from pdf_generator import PDFGenerator
+                        pdf_gen = PDFGenerator()
+                        pdf_path = await pdf_gen.url_to_pdf(url)
+                    except Exception as pdf_error:
+                        print(f"⚠️ PDF 생성 실패: {pdf_error}")
+
                 await browser.close()
-                return {"url": url, "title": title, "text_summary": text + "..."}
+
+                return {
+                    "url": url,
+                    "title": title,
+                    "text_summary": text,
+                    "emails": emails,
+                    "phones": phones,
+                    "links": links,
+                    "social_media": social_media,
+                    "metadata": metadata,
+                    "pdf_path": pdf_path
+                }
         except Exception as e:
             return {"error": f"Playwright 분석 실패: {str(e)}"}
 
@@ -191,9 +228,8 @@ async def search_username(username: str) -> str:
     """
     if not HAS_TOOLS:
         return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
-    
+
     client = SherlockClient()
-    # 시간 관계상 주요 사이트만 검색
     sites = ["github", "twitter", "instagram", "facebook", "linkedin", "tinder"]
     result = await client.search(username, sites=sites)
     return json.dumps(result, ensure_ascii=False)
@@ -227,14 +263,22 @@ async def check_ip_reputation(ip: str) -> str:
 @tool
 async def analyze_webpage(url: str) -> str:
     """
-    Playwright를 사용하여 웹페이지에 직접 접속해 텍스트와 정보를 추출합니다.
+    Playwright를 사용하여 웹페이지에 직접 접속해 상세 정보를 추출합니다.
+
+    추출 정보:
+    - 페이지 제목 및 메타데이터
+    - 본문 텍스트 요약
+    - 이메일 주소, 전화번호
+    - 모든 링크 및 소셜 미디어 링크
+    - PDF 스냅샷 자동 생성
+
     웹사이트의 내용을 자세히 파악하거나 요약할 때 사용합니다.
     """
     if not HAS_TOOLS:
         return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
 
     client = PlaywrightClient()
-    result = await client.analyze_url(url)
+    result = await client.analyze_url(url, generate_pdf=True)
     return json.dumps(result, ensure_ascii=False)
 
 @tool
@@ -245,9 +289,7 @@ async def search_leaks(term: str) -> str:
     """
     if not HAS_TOOLS:
         return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
-    
-    # Intelligence X는 구현이 복잡하므로 여기서는 Mock 또는 간단한 메시지 반환
-    # 실제 구현 필요 시 별도 라이브러리 사용
+
     return json.dumps({"message": "Intelligence X 기능은 현재 API 키 설정이 필요합니다."}, ensure_ascii=False)
 
 @tool
@@ -259,11 +301,10 @@ async def search_local_db(query: str) -> str:
     records = db.get_all_records()
     results = []
     query = query.lower()
-    
+
     for r in records:
-        # 타겟, URL, 요약 내용에서 검색
-        if (query in r['target'].lower() or 
-            query in r['url'].lower() or 
+        if (query in r['target'].lower() or
+            query in r['url'].lower() or
             query in r['summary'].lower()):
             results.append({
                 "timestamp": r['timestamp'],
@@ -272,38 +313,83 @@ async def search_local_db(query: str) -> str:
                 "summary": r['summary'],
                 "threat": r['threat_level']
             })
-    
+
     if not results:
         return "데이터베이스에서 관련 기록을 찾을 수 없습니다."
-        
+
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 @tool
-async def save_to_db(target: str, summary: str, method: str, threat_level: str = "unknown") -> str:
+async def save_to_db(
+    target: str,
+    summary: str,
+    method: str,
+    url: str = "",
+    pdf_path: str = "",
+    emails: list = None,
+    phones: list = None,
+    social_media: list = None,
+    threat_level: str = "unknown",
+    additional_metadata: dict = None
+) -> str:
     """
     조사 결과(정보)를 데이터베이스에 저장합니다.
     새로운 유의미한 정보를 발견했을 때 반드시 이 도구를 사용하여 기록을 남겨야 합니다.
-    
+
     Args:
         target: 조사 대상 (예: username, domain, IP)
-        summary: 발견된 정보 요약 (한글로 작성)
-        method: 사용한 도구 이름 (예: search_username, check_domain_reputation)
+        summary: 발견된 정보의 상세한 요약 (한글로 작성, 가능한 길고 자세하게)
+        method: 사용한 도구 이름 (예: search_username, check_domain_reputation, analyze_webpage)
+        url: 관련 URL (있는 경우)
+        pdf_path: PDF 스냅샷 경로 (있는 경우)
+        emails: 발견된 이메일 주소 리스트
+        phones: 발견된 전화번호 리스트
+        social_media: 발견된 소셜 미디어 링크 리스트
         threat_level: 위협 수준 (safe, suspicious, malicious, unknown 중 하나)
+        additional_metadata: 추가 메타데이터 (dict)
+
+    중요: summary는 발견된 모든 중요 정보를 포함하여 최대한 상세하게 작성해야 합니다.
     """
     try:
+        print(f"[DEBUG] save_to_db 호출됨 - target: {target}, method: {method}")
+
+        sensitive_info = {}
+        if emails:
+            sensitive_info["emails"] = emails
+        if phones:
+            sensitive_info["phones"] = phones
+        if social_media:
+            sensitive_info["social_media"] = social_media
+
+        metadata = {"source": "AI Chatbot Agent"}
+        if additional_metadata:
+            metadata.update(additional_metadata)
+
+        print(f"[DEBUG] DB 경로: {db.db_path}")
+        print(f"[DEBUG] 저장 시도 - target: {target}, url: {url}, summary 길이: {len(summary)}")
+
         success = db.add_record(
             target=target,
+            url=url,
+            pdf_path=pdf_path,
             summary=summary,
+            sensitive_info=sensitive_info,
             collection_method=method,
             threat_level=threat_level,
-            metadata={"source": "AI Chatbot Agent"}
+            metadata=metadata
         )
+
+        print(f"[DEBUG] 저장 결과: {success}")
+
         if success:
-            return "데이터베이스에 성공적으로 저장되었습니다."
+            return f"✅ 데이터베이스에 성공적으로 저장되었습니다.\n- 타겟: {target}\n- URL: {url or '없음'}\n- PDF: {'생성됨' if pdf_path else '없음'}\n- DB 경로: {db.db_path}"
         else:
-            return "저장에 실패했습니다."
+            return "❌ 저장에 실패했습니다."
     except Exception as e:
-        return f"저장 중 오류 발생: {str(e)}"
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[ERROR] save_to_db 오류: {error_detail}")
+        return f"❌ 저장 중 오류 발생: {str(e)}\n상세: {error_detail}"
 
 # 사용 가능한 도구 목록
 tools = [search_username, check_domain_reputation, check_ip_reputation, analyze_webpage, search_leaks, search_local_db, save_to_db]
@@ -340,6 +426,8 @@ async def root():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OSINT Dashboard</title>
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -347,47 +435,59 @@ async def root():
             box-sizing: border-box;
         }
 
+        html, body {
+            height: 100vh;
+            overflow: hidden;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
             padding: 20px;
+            display: flex;
+            flex-direction: column;
         }
 
         .container {
             max-width: 1400px;
             margin: 0 auto;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow: hidden;
         }
 
         .header {
             background: white;
-            padding: 30px;
+            padding: 20px 30px;
             border-radius: 15px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-bottom: 30px;
+            flex-shrink: 0;
         }
 
         .header h1 {
             color: #333;
-            margin-bottom: 10px;
-            font-size: 2.5em;
+            margin-bottom: 5px;
+            font-size: 2em;
         }
 
         .header p {
             color: #666;
-            font-size: 1.1em;
+            font-size: 1em;
         }
 
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 20px;
-            margin-bottom: 30px;
+            flex-shrink: 0;
         }
 
         .stat-card {
             background: white;
-            padding: 25px;
+            padding: 20px;
             border-radius: 15px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.1);
             transition: transform 0.3s ease;
@@ -399,36 +499,37 @@ async def root():
 
         .stat-card h3 {
             color: #888;
-            font-size: 0.9em;
+            font-size: 0.85em;
             text-transform: uppercase;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
             font-weight: 600;
         }
 
         .stat-card .value {
             color: #667eea;
-            font-size: 2.5em;
+            font-size: 2em;
             font-weight: bold;
         }
 
         .filters {
             background: white;
-            padding: 25px;
+            padding: 20px;
             border-radius: 15px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            margin-bottom: 30px;
+            flex-shrink: 0;
         }
 
         .filters h2 {
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             color: #333;
+            font-size: 1.3em;
         }
 
         .filter-group {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
         }
 
         .filter-group input,
@@ -479,37 +580,71 @@ async def root():
 
         .records {
             background: white;
-            padding: 25px;
+            padding: 20px;
             border-radius: 15px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 0;
         }
 
         .records h2 {
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             color: #333;
+            font-size: 1.3em;
+            flex-shrink: 0;
+        }
+
+        .records-table-wrapper {
+            width: 100%;
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
         }
 
         .records-table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
         }
 
         .records-table thead {
+            position: sticky;
+            top: 0;
             background: #f8f9fa;
+            z-index: 10;
         }
 
         .records-table th {
-            padding: 15px;
+            padding: 12px 8px;
             text-align: left;
             font-weight: 600;
             color: #555;
             border-bottom: 2px solid #e0e0e0;
+            background: #f8f9fa;
         }
 
         .records-table td {
-            padding: 15px;
+            padding: 10px 8px;
             border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
+
+        /* 칼럼별 너비 설정 */
+        .records-table col:nth-child(1) { width: 11%; } /* 시간 */
+        .records-table col:nth-child(2) { width: 10%; } /* 타겟 */
+        .records-table col:nth-child(3) { width: 14%; } /* URL */
+        .records-table col:nth-child(4) { width: 22%; } /* 요약 */
+        .records-table col:nth-child(5) { width: 13%; } /* 수집 방법 */
+        .records-table col:nth-child(6) { width: 10%; } /* 위협 수준 */
+        .records-table col:nth-child(7) { width: 20%; } /* 액션 */
 
         .records-table tbody tr {
             transition: background 0.2s;
@@ -559,18 +694,33 @@ async def root():
             color: #999;
         }
 
+        .records-table td:nth-child(7) {
+            white-space: normal;
+        }
+
         .action-btns {
             display: flex;
-            gap: 10px;
+            gap: 4px;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
         }
 
         .btn-small {
-            padding: 5px 15px;
-            font-size: 0.85em;
-            border-radius: 5px;
+            padding: 5px 8px;
+            font-size: 0.7em;
+            border-radius: 4px;
             border: none;
             cursor: pointer;
             transition: all 0.2s;
+            white-space: nowrap;
+            min-width: 40px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 500;
+            line-height: 1;
         }
 
         .btn-view {
@@ -653,25 +803,61 @@ async def root():
         }
 
         @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            .container {
+                gap: 10px;
+            }
+
+            .header {
+                padding: 15px 20px;
+            }
+
             .header h1 {
-                font-size: 1.8em;
+                font-size: 1.5em;
+            }
+
+            .header p {
+                font-size: 0.9em;
             }
 
             .stats-grid {
-                grid-template-columns: 1fr;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 15px;
+            }
+
+            .stat-card .value {
+                font-size: 1.5em;
             }
 
             .filter-group {
                 grid-template-columns: 1fr;
             }
 
+            .records {
+                padding: 15px;
+            }
+
             .records-table {
-                font-size: 0.85em;
+                font-size: 0.75em;
             }
 
             .records-table th,
             .records-table td {
-                padding: 10px;
+                padding: 8px 4px;
+            }
+
+            .btn-small {
+                font-size: 0.65em;
+                padding: 4px 6px;
+                min-width: 35px;
+                height: 22px;
             }
         }
 
@@ -758,6 +944,89 @@ async def root():
             border-bottom-left-radius: 2px;
         }
 
+        /* Markdown styling in messages */
+        .message h1, .message h2, .message h3 {
+            margin-top: 10px;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        .message h1 { font-size: 1.3em; }
+        .message h2 { font-size: 1.2em; }
+        .message h3 { font-size: 1.1em; }
+
+        .message ul, .message ol {
+            margin-left: 20px;
+            margin-top: 5px;
+            margin-bottom: 5px;
+        }
+
+        .message li {
+            margin: 3px 0;
+        }
+
+        .message code {
+            background: #f0f0f0;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+
+        .message pre {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 5px 0;
+        }
+
+        .message pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .message blockquote {
+            border-left: 3px solid #667eea;
+            padding-left: 10px;
+            margin: 5px 0;
+            color: #666;
+        }
+
+        .message a {
+            color: #667eea;
+            text-decoration: underline;
+        }
+
+        .message strong {
+            font-weight: bold;
+        }
+
+        .message em {
+            font-style: italic;
+        }
+
+        .message p {
+            margin: 5px 0;
+        }
+
+        .message table {
+            border-collapse: collapse;
+            margin: 10px 0;
+            width: 100%;
+        }
+
+        .message th, .message td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .message th {
+            background: #f0f0f0;
+            font-weight: bold;
+        }
+
         .chat-input-area {
             padding: 15px;
             background: white;
@@ -774,6 +1043,11 @@ async def root():
             outline: none;
         }
 
+        .chat-input-area input:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+        }
+
         .chat-input-area button {
             background: #667eea;
             color: white;
@@ -782,6 +1056,13 @@ async def root():
             height: 40px;
             border-radius: 50%;
             cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .chat-input-area button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            opacity: 0.6;
         }
 
         .tool-status {
@@ -798,6 +1079,68 @@ async def root():
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(5px); }
             to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Typing indicator animation */
+        .typing-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 10px 15px;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: #999;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+                opacity: 0.4;
+            }
+            30% {
+                transform: translateY(-10px);
+                opacity: 1;
+            }
+        }
+
+        /* Processing badge */
+        .processing-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            background: #667eea;
+            color: white;
+            border-radius: 10px;
+            font-size: 0.75em;
+            margin-left: 8px;
+            animation: pulse 1.5s infinite;
+        }
+
+        .completed-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            background: #28a745;
+            color: white;
+            border-radius: 10px;
+            font-size: 0.75em;
+            margin-left: 8px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
     </style>
 </head>
@@ -907,8 +1250,10 @@ async def root():
 
         async function loadRecords() {
             try {
-                const response = await fetch('/api/records');
+                console.log('[DEBUG] 레코드 로딩 시작...');
+                const response = await fetch('/api/records?_=' + Date.now());
                 allRecords = await response.json();
+                console.log(`[DEBUG] 로딩된 레코드 수: ${allRecords.length}`);
                 displayRecords(allRecords);
             } catch (error) {
                 console.error('레코드 로딩 실패:', error);
@@ -926,40 +1271,61 @@ async def root():
             }
 
             let html = `
-                <table class="records-table">
-                    <thead>
-                        <tr>
-                            <th>시간</th>
-                            <th>타겟</th>
-                            <th>수집 방법</th>
-                            <th>위협 수준</th>
-                            <th>액션</th>
-                        </tr>
-                    </thead>
-                    <tbody>
+                <div class="records-table-wrapper">
+                    <table class="records-table">
+                        <colgroup>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th>시간</th>
+                                <th>타겟</th>
+                                <th>URL</th>
+                                <th>요약</th>
+                                <th>수집 방법</th>
+                                <th>위협 수준</th>
+                                <th>액션</th>
+                            </tr>
+                        </thead>
+                        <tbody>
             `;
 
             records.forEach(record => {
-                const time = new Date(record.timestamp).toLocaleString('ko-KR');
+                const time = new Date(record.timestamp).toLocaleString('ko-KR', {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
                 const threatClass = 'threat-' + record.threat_level;
                 const hasPdf = record.pdf_path ? true : false;
 
                 html += `
                     <tr>
-                        <td>${time}</td>
-                        <td title="${record.target}">${truncate(record.target, 40)}</td>
-                        <td>${record.collection_method}</td>
+                        <td title="${new Date(record.timestamp).toLocaleString('ko-KR')}">${time}</td>
+                        <td title="${record.target}">${record.target}</td>
+                        <td title="${record.url}">${record.url ? `<a href="${record.url}" target="_blank" style="color: #667eea; text-decoration: none;">${record.url}</a>` : '-'}</td>
+                        <td title="${record.summary}">${record.summary}</td>
+                        <td title="${record.collection_method}">${record.collection_method}</td>
                         <td><span class="threat-badge ${threatClass}">${record.threat_level}</span></td>
-                        <td class="action-btns">
-                            <button class="btn-small btn-view" onclick='viewDetail(${JSON.stringify(record).replace(/'/g, "&apos;")})'>상세</button>
-                            ${hasPdf ? `<button class="btn-small btn-pdf" onclick="downloadPdf('${record.pdf_path}')">PDF</button>` : ''}
-                            <button class="btn-small btn-delete" onclick="deleteRecord('${record.timestamp}')">삭제</button>
+                        <td>
+                            <div class="action-btns">
+                                <button class="btn-small btn-view" onclick='viewDetail(${JSON.stringify(record).replace(/'/g, "&apos;")})'>상세</button>
+                                ${hasPdf ? `<button class="btn-small btn-pdf" onclick="downloadPdf('${record.pdf_path}')">PDF</button>` : ''}
+                                <button class="btn-small btn-delete" onclick="deleteRecord('${record.timestamp}')">삭제</button>
+                            </div>
                         </td>
                     </tr>
                 `;
             });
 
-            html += '</tbody></table>';
+            html += '</tbody></table></div>';
             container.innerHTML = html;
         }
 
@@ -1064,7 +1430,6 @@ async def root():
             window.open(`/api/pdf?path=${encodeURIComponent(pdfPath)}`, '_blank');
         }
 
-        // 모달 외부 클릭 시 닫기
         window.onclick = function(event) {
             const modal = document.getElementById('detail-modal');
             if (event.target === modal) {
@@ -1072,11 +1437,9 @@ async def root():
             }
         }
 
-        // 초기 로딩
         loadStats();
         loadRecords();
 
-        // 30초마다 자동 새로고침
         setInterval(() => {
             loadStats();
             loadRecords();
@@ -1085,12 +1448,13 @@ async def root():
         // 챗봇 관련 스크립트 (WebSocket 적용)
         let ws = null;
         let currentAiMessageId = null;
+        let isProcessing = false;
 
         function toggleChat() {
             const chatWindow = document.getElementById('chat-window');
             if (chatWindow.style.display === 'none' || chatWindow.style.display === '') {
                 chatWindow.style.display = 'flex';
-                connectWebSocket(); // 채팅창 열 때 연결
+                connectWebSocket();
             } else {
                 chatWindow.style.display = 'none';
             }
@@ -1101,84 +1465,79 @@ async def root():
 
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws/chat`;
-            
+
             ws = new WebSocket(wsUrl);
-            
+
             ws.onmessage = function(event) {
                 const data = JSON.parse(event.data);
                 handleWsMessage(data);
             };
 
             ws.onclose = function() {
-                // 연결 끊기면 잠시 후 재연결 시도
                 setTimeout(connectWebSocket, 3000);
             };
         }
 
+        function setInputEnabled(enabled) {
+            const input = document.getElementById('chat-input');
+            const button = document.querySelector('.chat-input-area button');
+
+            if (enabled) {
+                input.disabled = false;
+                button.disabled = false;
+                isProcessing = false;
+            } else {
+                input.disabled = true;
+                button.disabled = true;
+                isProcessing = true;
+            }
+        }
+
         function handleWsMessage(data) {
             const container = document.getElementById('chat-messages');
-            
+
             if (data.type === 'start') {
-                // AI 응답 시작 (메시지 박스 미리 생성)
-                currentAiMessageId = addMessage('', 'ai', true);
+                currentAiMessageId = addTypingIndicator();
+                setInputEnabled(false);
             } else if (data.type === 'answer') {
-                // AI 답변 텍스트 추가
-                const el = document.getElementById(currentAiMessageId);
-                if (el) {
-                    // 로딩 텍스트 제거 및 내용 채우기
-                    if (el.textContent === '분석 중...') el.textContent = '';
-                    
-                    // 텍스트 노드 추가 (기존 도구 로그 유지)
-                    const textNode = document.createTextNode(data.content);
-                    el.appendChild(textNode);
-                    el.id = ''; // 로딩 상태 해제
-                    currentAiMessageId = null;
-                } else {
-                    addMessage(data.content, 'ai');
-                }
+                removeTypingIndicator();
+                addMessage(data.content, 'ai', false, true);
+                currentAiMessageId = null;
             } else if (data.type === 'tool_start') {
-                // 도구 실행 알림을 현재 AI 메시지 박스 *내부* 상단에 추가하거나,
-                // 혹은 별도 박스지만 AI 답변 *전에* 배치
-                
-                // 여기서는 별도의 tool-status div를 만들되, 답변보다 먼저 보이게 처리
-                // 만약 답변 박스(currentAiMessageId)가 이미 있다면 그 *앞*에 삽입해야 함.
-                // 하지만 구조상 답변 박스가 먼저 만들어져 있으므로, 답변 박스 *안*의 맨 앞에 넣거나
-                // 답변 박스를 잠시 숨기고 도구 박스를 넣는 식이어야 함.
-                
-                // 가장 쉬운 방법: 도구 상태를 별도 메시지로 취급하되, 시각적으로 구별
                 const div = document.createElement('div');
                 div.className = 'tool-status';
-                div.innerHTML = `🛠️ <strong>${data.tool}</strong> 실행 중...<br><small>${data.args}</small>`;
-                
-                const aiMsg = document.getElementById(currentAiMessageId);
-                if (aiMsg) {
-                    // 답변 박스 바로 위에 삽입
-                    container.insertBefore(div, aiMsg);
-                } else {
-                    container.appendChild(div);
-                }
+                div.id = `tool-status-${Date.now()}`;
+                div.innerHTML = `🛠️ <strong>${data.tool}</strong> 실행 중...<span class="processing-badge">처리중</span><br><small>${truncateText(data.args, 100)}</small>`;
+                container.appendChild(div);
                 container.scrollTop = container.scrollHeight;
-                
             } else if (data.type === 'tool_end') {
-                // 도구 실행 완료
                 const div = document.createElement('div');
                 div.className = 'tool-status';
                 div.style.borderLeftColor = '#28a745';
-                div.innerHTML = `✅ <strong>${data.tool}</strong> 완료<br><small>${data.result}</small>`;
-                
-                const aiMsg = document.getElementById(currentAiMessageId);
-                if (aiMsg) {
-                    container.insertBefore(div, aiMsg);
-                } else {
-                    container.appendChild(div);
-                }
+                div.innerHTML = `✅ <strong>${data.tool}</strong> 완료<br><small>${truncateText(data.result, 100)}</small>`;
+                container.appendChild(div);
                 container.scrollTop = container.scrollHeight;
-                
             } else if (data.type === 'error') {
+                removeTypingIndicator();
                 addMessage(`❌ 오류: ${data.content}`, 'ai');
+                setInputEnabled(true);
             } else if (data.type === 'done') {
+                removeTypingIndicator();
                 currentAiMessageId = null;
+                setInputEnabled(true);
+                setTimeout(() => {
+                    console.log('[DEBUG] 데이터베이스 새로고침 시작');
+                    loadRecords();
+                    loadStats();
+                }, 500);
             }
+        }
+
+        function truncateText(text, maxLength) {
+            if (text.length > maxLength) {
+                return text.substring(0, maxLength) + '...';
+            }
+            return text;
         }
 
         function handleKeyPress(e) {
@@ -1190,33 +1549,59 @@ async def root():
             const message = input.value.trim();
             if (!message) return;
 
+            if (isProcessing) {
+                return;
+            }
+
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 alert('서버와 연결되지 않았습니다. 잠시 후 다시 시도해주세요.');
                 connectWebSocket();
                 return;
             }
 
-            // 사용자 메시지 표시
             addMessage(message, 'user');
             input.value = '';
 
-            // 서버로 전송
             ws.send(JSON.stringify({ message: message }));
         }
 
-        function addMessage(text, type, isLoading = false) {
+        function addMessage(text, type, isLoading = false, useMarkdown = false) {
             const container = document.getElementById('chat-messages');
             const div = document.createElement('div');
             div.className = `message ${type}`;
+
             if (isLoading) {
                 div.id = 'ai-msg-' + Date.now();
                 div.textContent = '분석 중...';
             } else {
-                div.textContent = text;
+                if (useMarkdown && type === 'ai' && typeof marked !== 'undefined') {
+                    div.innerHTML = marked.parse(text);
+                } else {
+                    div.textContent = text;
+                }
             }
+
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             return div.id;
+        }
+
+        function addTypingIndicator() {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = 'message ai';
+            div.id = 'typing-indicator';
+            div.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return div.id;
+        }
+
+        function removeTypingIndicator() {
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
         }
 
         function removeMessage(id) {
@@ -1292,94 +1677,208 @@ async def export_database():
 # WebSocket 채팅 엔드포인트 (Streaming + Memory)
 # ============================================================================
 
-# 간단한 인메모리 세션 저장소 (실제 프로덕션에서는 Redis 등을 권장)
 chat_sessions: Dict[int, List[Any]] = {}
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    
-    # 세션 ID 생성 (간단히 메모리 주소 사용하거나 UUID 사용 가능)
+
     session_id = id(websocket)
     chat_sessions[session_id] = []
-    
+
     if not HAS_LLM:
         await websocket.send_json({"type": "error", "content": "서버에 LLM 라이브러리가 설치되어 있지 않습니다."})
         await websocket.close()
         return
 
     try:
-        # 시스템 프롬프트 (최초 1회 설정)
-        system_prompt = SystemMessage(content="""너는 OSINT(공개출처정보) 분석 전문가 AI Agent야.
+        system_prompt = SystemMessage(content="""너는 고급 OSINT(공개출처정보) 분석 및 위협 탐지 전문가 AI Agent입니다.
 
-[핵심 지침]
-1. **불필요한 도구 사용 금지**: 인사('안녕'), 일반적인 대화, 배경 지식 질문에는 절대 도구를 호출하지 말고 바로 답변해.
-2. **명확한 요청 시 도구 사용**: 사용자가 특정 타겟(IP, 도메인, ID)에 대한 조사, 검색, 분석을 '명시적으로' 요청했을 때만 도구를 사용해.
-3. **데이터 우선 확인**: 조사 요청이 오면 먼저 'search_local_db'를 사용해 수집된 데이터를 확인해.
-4. **결과 자동 저장**: 조사 도구(Sherlock 등)를 사용하여 유의미한 새로운 정보를 발견하면, 반드시 'save_to_db'를 사용하여 DB에 기록해.
-5. **한국어 답변**: 항상 친절하고 전문적인 한국어로 답변해.
+# 핵심 임무
+사용자가 간단한 명령("minseolee 사용자 조사해", "example.com 분석해")만 입력해도 자동으로 포괄적인 OSINT 조사를 수행하고 모든 발견 사항을 데이터베이스에 체계적으로 저장합니다.
+
+# 작업 수행 지침
+
+## 1. 일반 대화 vs 조사 요청 구분
+- **일반 대화**: 인사('안녕', 'hi'), 단순 질문('OSINT가 뭐야?'), 감사 인사 등 → 도구 사용 없이 바로 답변
+- **조사 요청**: 특정 타겟(사용자명, 도메인, IP, 이메일 등)에 대한 "조사", "분석", "찾아줘", "검색" 등의 키워드 포함 → 자동 조사 워크플로우 실행
+
+## 2. 자동 OSINT 조사 워크플로우
+
+사용자가 조사 요청을 하면 다음 단계를 **자동으로** 순차 실행:
+
+### Step 1: 기존 데이터 확인
+```
+1. search_local_db(타겟명)로 과거 조사 기록 확인
+2. 기존 기록이 있으면 사용자에게 요약 제시
+```
+
+### Step 2: 타겟 유형 식별 및 적절한 도구 선택
+```
+- 사용자명/계정 → search_username(username)
+- 도메인 → check_domain_reputation(domain) + analyze_webpage(url)
+- IP 주소 → check_ip_reputation(ip)
+- URL → analyze_webpage(url)
+```
+
+### Step 3: 심화 분석 (자동)
+```
+- search_username 결과로 SNS 계정 발견 시:
+  → 각 계정 URL에 대해 analyze_webpage 실행
+  → 프로필 정보, 이메일, 전화번호, 링크 추출
+
+- analyze_webpage로 웹사이트 분석 시:
+  → 자동으로 PDF 스냅샷 생성
+  → 이메일, 전화번호, 소셜 미디어 링크 추출
+  → 메타데이터 수집
+
+- 도메인 발견 시:
+  → check_domain_reputation으로 위협 평가
+```
+
+### Step 4: 결과 저장 (필수)
+```
+모든 유의미한 발견 사항은 반드시 save_to_db로 저장:
+
+save_to_db(
+    target="조사 대상명",
+    summary="상세한 분석 요약 (최소 3-5문장, 발견된 모든 중요 정보 포함)",
+    method="사용한 도구명",
+    url="관련 URL (있는 경우)",
+    pdf_path="PDF 경로 (analyze_webpage에서 반환)",
+    emails=[발견된 이메일들],
+    phones=[발견된 전화번호들],
+    social_media=[소셜 미디어 링크들],
+    threat_level="safe/suspicious/malicious/unknown",
+    additional_metadata={추가 정보}
+)
+
+⚠️ summary는 한 줄이 아니라 다음을 포함한 상세한 내용:
+- 발견된 계정/사이트 목록
+- 추출된 연락처 정보
+- 위협 평가 결과
+- 특이 사항 및 주의사항
+```
+
+### Step 5: 사용자에게 보고
+```
+마크다운 형식으로 구조화된 보고서 작성:
+
+## 🔍 [타겟명] OSINT 조사 결과
+
+### 📋 요약
+- **조사 대상**: ...
+- **발견 계정 수**: ...
+- **위협 수준**: ...
+
+### 🎯 발견된 계정
+1. **GitHub**: https://github.com/...
+2. **Twitter**: https://twitter.com/...
+
+### 📧 수집된 정보
+- **이메일**: ...
+- **전화번호**: ...
+
+### ⚠️ 위협 분석
+...
+
+### 💾 데이터베이스 저장 완료
+모든 정보가 데이터베이스에 저장되었습니다.
+```
+
+## 3. 예시 시나리오
+
+### 예시 1: "minseolee 조사해"
+```
+1. search_local_db("minseolee") → 기존 기록 확인
+2. search_username("minseolee") → GitHub, Twitter, Instagram 발견
+3. analyze_webpage("https://github.com/minseolee") → 프로필 분석, PDF 생성
+4. analyze_webpage("https://twitter.com/minseolee") → 프로필 분석, PDF 생성
+5. save_to_db(
+     target="minseolee",
+     summary="GitHub(팔로워 234, 프로젝트 15개), Twitter(팔로워 567), Instagram 계정 발견. GitHub에서 Python 전문가로 활동 중. 이메일 minseo@example.com 발견. 위협 요소 없음.",
+     method="search_username",
+     url="https://github.com/minseolee",
+     pdf_path="./pdfs/20250123_abc123.pdf",
+     emails=["minseo@example.com"],
+     social_media=[...],
+     threat_level="safe"
+   )
+6. 사용자에게 마크다운 보고서 제시
+```
+
+### 예시 2: "example.com 분석해"
+```
+1. search_local_db("example.com")
+2. check_domain_reputation("example.com") → 위협 평가
+3. analyze_webpage("https://example.com") → 상세 분석 + PDF
+4. save_to_db(...)
+5. 보고서 제시
+```
+
+## 4. 중요 원칙
+
+✅ **DO (반드시 해야 할 것)**
+- 조사 요청 시 자동으로 여러 도구를 연쇄 실행
+- 발견된 모든 URL/계정에 대해 analyze_webpage 실행
+- 모든 결과를 **상세한 summary**와 함께 save_to_db로 저장
+- PDF 스냅샷 항상 생성
+- 마크다운으로 구조화된 보고서 작성
+
+❌ **DON'T (하지 말아야 할 것)**
+- 도구 하나만 실행하고 끝내기
+- summary를 한 줄로 간략하게 작성하기
+- PDF 생성 생략하기
+- 수집된 이메일/전화번호를 save_to_db에 전달하지 않기
+- 일반 대화에 도구 사용하기
+
+## 5. 답변 형식
+항상 **친절하고 전문적인 한국어**로 답변하며, 마크다운을 적극 활용하여 가독성을 높입니다.
 """)
         chat_sessions[session_id].append(system_prompt)
 
         while True:
-            # 메시지 수신
             data = await websocket.receive_json()
             user_message = data.get("message", "")
-            
+
             if not user_message:
                 continue
 
-            # 1. 모델 설정
-            # 사용자가 요청한 Qwen3 모델 사용
             llm = ChatOllama(model="qwen3:14b", temperature=0)
-            
-            # 2. 도구 준비
+
             tool_map = {t.name: t for t in tools}
             llm_with_tools = llm.bind_tools(tools)
 
-            # 3. 메시지 히스토리 업데이트
-            # 사용자 메시지 추가
             chat_sessions[session_id].append(HumanMessage(content=user_message))
-            
-            # 문맥 제한 (너무 길어지면 앞부분 자르기 - 시스템 메시지는 유지)
+
             if len(chat_sessions[session_id]) > 20:
                 chat_sessions[session_id] = [chat_sessions[session_id][0]] + chat_sessions[session_id][-15:]
 
-            # 4. 실행 루프 (Streaming)
             await websocket.send_json({"type": "start", "content": "분석을 시작합니다..."})
-            
-            # 현재 턴에서 사용할 메시지 복사본 (도구 실행 결과 등은 이 턴에서만 유효할 수도 있지만, 히스토리에 남김)
+
             current_messages = chat_sessions[session_id].copy()
-            
+
             final_response = ""
-            for i in range(5): # 최대 5단계
-                # LLM 호출
+            for i in range(5):
                 ai_msg = await llm_with_tools.ainvoke(current_messages)
-                current_messages.append(ai_msg) # 대화 흐름에 AI 응답 추가
-                
-                # 도구 호출이 없는 경우 (최종 답변)
+                current_messages.append(ai_msg)
+
                 if not ai_msg.tool_calls:
                     final_response = ai_msg.content
-                    # 최종 답변을 세션 히스토리에 저장
                     chat_sessions[session_id].append(ai_msg)
-                    
-                    # 답변 전송 (도구 실행 내역이 먼저 출력된 후 마지막에 출력됨)
                     await websocket.send_json({"type": "answer", "content": final_response})
                     break
-                
-                # 도구 호출 감지 및 실행
+
                 for tool_call in ai_msg.tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
-                    
-                    # UI에 알림 (도구 실행 시작)
+
                     await websocket.send_json({
-                        "type": "tool_start", 
-                        "tool": tool_name, 
+                        "type": "tool_start",
+                        "tool": tool_name,
                         "args": str(tool_args)
                     })
-                    
-                    # 도구 실행
+
                     if tool_name in tool_map:
                         tool_func = tool_map[tool_name]
                         try:
@@ -1388,20 +1887,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             tool_result = f"Error executing {tool_name}: {str(e)}"
                     else:
                         tool_result = f"Error: Tool {tool_name} not found"
-                    
-                    # 결과 메시지 추가
+
                     tool_msg = ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"])
                     current_messages.append(tool_msg)
-                    
-                    # UI에 결과 알림 (도구 실행 완료)
-                    preview = str(tool_result)[:300] + "..." if len(str(tool_result)) > 300 else str(tool_result)
+
+                    preview = str(tool_result)[:200] + "..." if len(str(tool_result)) > 200 else str(tool_result)
                     await websocket.send_json({
-                        "type": "tool_end", 
-                        "tool": tool_name, 
+                        "type": "tool_end",
+                        "tool": tool_name,
                         "result": preview
                     })
-            
-            # 도구 실행 과정을 포함한 전체 대화를 히스토리에 반영
+
             chat_sessions[session_id] = current_messages
 
             await websocket.send_json({"type": "done"})
@@ -1409,7 +1905,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print("WebSocket disconnected")
         if session_id in chat_sessions:
-            del chat_sessions[session_id] # 연결 끊기면 세션 삭제
+            del chat_sessions[session_id]
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1423,10 +1919,8 @@ async def chat_endpoint(request: ChatRequest):
         return {"response": "서버에 LLM 라이브러리가 설치되어 있지 않습니다."}
 
     try:
-        # 1. 모델 설정
         llm = ChatOllama(model="qwen3:14b", temperature=0)
-        
-        # 2. DB 컨텍스트 구성
+
         records = db.get_all_records()
         recent_records = records[-5:] if len(records) > 5 else records
         db_context = "최근 수집된 데이터:\n"
@@ -1435,65 +1929,71 @@ async def chat_endpoint(request: ChatRequest):
         if not recent_records:
             db_context = "최근 수집된 데이터가 없습니다."
 
-        # 3. 직접 구현한 Agent 실행 루프 (LangChain AgentExecutor 대체)
-        
-        # 도구 이름과 설명 매핑
         tool_map = {t.name: t for t in tools}
-        
-        messages = [
-            SystemMessage(content=f"""너는 OSINT(공개출처정보) 분석 전문가 AI Agent야.
 
-[핵심 지침]
-1. **불필요한 도구 사용 금지**: 인사('안녕'), 일반적인 대화, 배경 지식 질문에는 절대 도구를 호출하지 말고 바로 답변해.
-2. **명확한 요청 시 도구 사용**: 사용자가 특정 타겟(IP, 도메인, ID)에 대한 조사, 검색, 분석을 '명시적으로' 요청했을 때만 도구를 사용해.
-3. **데이터 우선 확인**: 조사 요청이 오면 먼저 아래 [수집된 데이터]에 정보가 있는지 확인해.
-4. **한국어 답변**: 항상 친절하고 전문적인 한국어로 답변해.
+        messages = [
+            SystemMessage(content=f"""너는 고급 OSINT(공개출처정보) 분석 및 위협 탐지 전문가 AI Agent입니다.
+
+# 핵심 임무
+사용자가 간단한 명령만 입력해도 자동으로 포괄적인 OSINT 조사를 수행하고 모든 발견 사항을 데이터베이스에 체계적으로 저장합니다.
+
+# 작업 수행 지침
+
+## 1. 일반 대화 vs 조사 요청 구분
+- **일반 대화**: 인사, 단순 질문 등 → 도구 사용 없이 바로 답변
+- **조사 요청**: 특정 타겟에 대한 "조사", "분석" 등 → 자동 조사 워크플로우 실행
+
+## 2. 자동 OSINT 조사 워크플로우
+1. search_local_db로 과거 기록 확인
+2. 타겟 유형에 맞는 도구 실행 (search_username, check_domain_reputation, analyze_webpage 등)
+3. 발견된 URL들에 대해 analyze_webpage 실행 (PDF 자동 생성)
+4. 모든 결과를 **상세한 summary**와 함께 save_to_db로 저장
+   - summary는 최소 3-5문장으로 발견된 모든 중요 정보 포함
+   - 이메일, 전화번호, 소셜미디어 링크 모두 전달
+5. 마크다운 형식으로 구조화된 보고서 제시
+
+## 3. 중요 원칙
+✅ DO: 자동으로 여러 도구 연쇄 실행, 상세한 summary 작성, PDF 생성, 마크다운 보고서
+❌ DON'T: 도구 하나만 실행하고 끝, summary 한 줄로 작성, 일반 대화에 도구 사용
 
 [수집된 데이터]
 {db_context}
+
+항상 **친절하고 전문적인 한국어**로 답변하며, 마크다운을 적극 활용하여 가독성을 높입니다.
 """),
             HumanMessage(content=request.message)
         ]
 
-        # 모델에 도구 바인딩
         llm_with_tools = llm.bind_tools(tools)
-        
-        # 실행 루프 (최대 5회)
+
         final_response = ""
         for _ in range(5):
-            # LLM 호출
             ai_msg = await llm_with_tools.ainvoke(messages)
             messages.append(ai_msg)
-            
-            # 도구 호출이 없는 경우 (최종 답변)
+
             if not ai_msg.tool_calls:
                 final_response = ai_msg.content
                 break
-                
-            # 도구 호출 실행
+
             for tool_call in ai_msg.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
-                
-                # 도구 실행
+
                 if tool_name in tool_map:
                     tool_func = tool_map[tool_name]
                     try:
-                        # 비동기 도구 실행
                         tool_result = await tool_func.ainvoke(tool_args)
                     except Exception as e:
                         tool_result = f"Error executing {tool_name}: {str(e)}"
                 else:
                     tool_result = f"Error: Tool {tool_name} not found"
-                
-                # 결과 메시지 추가
+
                 messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"]))
-        
+
         return {"response": final_response}
-        
+
     except Exception as e:
         print(f"Chat Error: {e}")
-        # 에러 발생 시 단순 RAG로 폴백하거나 에러 메시지 반환
         return {"response": f"처리 중 오류가 발생했습니다 (도구 호출 실패 등). 다시 시도해주세요. ({str(e)})"}
 
 
@@ -1508,6 +2008,6 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=8080,
         log_level="info"
     )
