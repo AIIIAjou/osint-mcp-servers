@@ -1119,37 +1119,64 @@ async def root():
             const container = document.getElementById('chat-messages');
             
             if (data.type === 'start') {
-                // AI 응답 시작
+                // AI 응답 시작 (메시지 박스 미리 생성)
                 currentAiMessageId = addMessage('', 'ai', true);
             } else if (data.type === 'answer') {
                 // AI 답변 텍스트 추가
                 const el = document.getElementById(currentAiMessageId);
                 if (el) {
-                    el.textContent = data.content; // 단순 텍스트 교체 (스트리밍이라면 += 사용)
+                    // 로딩 텍스트 제거 및 내용 채우기
+                    if (el.textContent === '분석 중...') el.textContent = '';
+                    
+                    // 텍스트 노드 추가 (기존 도구 로그 유지)
+                    const textNode = document.createTextNode(data.content);
+                    el.appendChild(textNode);
                     el.id = ''; // 로딩 상태 해제
                     currentAiMessageId = null;
                 } else {
                     addMessage(data.content, 'ai');
                 }
             } else if (data.type === 'tool_start') {
-                // 도구 실행 알림
+                // 도구 실행 알림을 현재 AI 메시지 박스 *내부* 상단에 추가하거나,
+                // 혹은 별도 박스지만 AI 답변 *전에* 배치
+                
+                // 여기서는 별도의 tool-status div를 만들되, 답변보다 먼저 보이게 처리
+                // 만약 답변 박스(currentAiMessageId)가 이미 있다면 그 *앞*에 삽입해야 함.
+                // 하지만 구조상 답변 박스가 먼저 만들어져 있으므로, 답변 박스 *안*의 맨 앞에 넣거나
+                // 답변 박스를 잠시 숨기고 도구 박스를 넣는 식이어야 함.
+                
+                // 가장 쉬운 방법: 도구 상태를 별도 메시지로 취급하되, 시각적으로 구별
                 const div = document.createElement('div');
                 div.className = 'tool-status';
                 div.innerHTML = `🛠️ <strong>${data.tool}</strong> 실행 중...<br><small>${data.args}</small>`;
-                container.appendChild(div);
+                
+                const aiMsg = document.getElementById(currentAiMessageId);
+                if (aiMsg) {
+                    // 답변 박스 바로 위에 삽입
+                    container.insertBefore(div, aiMsg);
+                } else {
+                    container.appendChild(div);
+                }
                 container.scrollTop = container.scrollHeight;
+                
             } else if (data.type === 'tool_end') {
                 // 도구 실행 완료
                 const div = document.createElement('div');
                 div.className = 'tool-status';
                 div.style.borderLeftColor = '#28a745';
                 div.innerHTML = `✅ <strong>${data.tool}</strong> 완료<br><small>${data.result}</small>`;
-                container.appendChild(div);
+                
+                const aiMsg = document.getElementById(currentAiMessageId);
+                if (aiMsg) {
+                    container.insertBefore(div, aiMsg);
+                } else {
+                    container.appendChild(div);
+                }
                 container.scrollTop = container.scrollHeight;
+                
             } else if (data.type === 'error') {
                 addMessage(`❌ 오류: ${data.content}`, 'ai');
             } else if (data.type === 'done') {
-                // 완료 처리
                 currentAiMessageId = null;
             }
         }
@@ -1335,6 +1362,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     final_response = ai_msg.content
                     # 최종 답변을 세션 히스토리에 저장
                     chat_sessions[session_id].append(ai_msg)
+                    
+                    # 답변 전송 (도구 실행 내역이 먼저 출력된 후 마지막에 출력됨)
                     await websocket.send_json({"type": "answer", "content": final_response})
                     break
                 
@@ -1343,7 +1372,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     
-                    # UI에 알림
+                    # UI에 알림 (도구 실행 시작)
                     await websocket.send_json({
                         "type": "tool_start", 
                         "tool": tool_name, 
@@ -1364,16 +1393,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     tool_msg = ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"])
                     current_messages.append(tool_msg)
                     
-                    # UI에 결과 알림
-                    preview = str(tool_result)[:200] + "..." if len(str(tool_result)) > 200 else str(tool_result)
+                    # UI에 결과 알림 (도구 실행 완료)
+                    preview = str(tool_result)[:300] + "..." if len(str(tool_result)) > 300 else str(tool_result)
                     await websocket.send_json({
                         "type": "tool_end", 
                         "tool": tool_name, 
                         "result": preview
                     })
             
-            # 도구 실행 과정을 포함한 전체 대화를 히스토리에 반영할지, 최종 결과만 반영할지 결정
-            # 여기서는 도구 실행 과정도 문맥으로 포함 (복잡한 추론 유지)
+            # 도구 실행 과정을 포함한 전체 대화를 히스토리에 반영
             chat_sessions[session_id] = current_messages
 
             await websocket.send_json({"type": "done"})
