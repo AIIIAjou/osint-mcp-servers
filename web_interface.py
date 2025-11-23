@@ -1898,6 +1898,14 @@ save_to_db(
                         "result": preview
                     })
 
+            # 5번 반복 후에도 답변이 없으면 최종 답변 생성
+            if not final_response:
+                final_ai_msg = await llm_with_tools.ainvoke(current_messages)
+                final_response = final_ai_msg.content
+                current_messages.append(final_ai_msg)
+                chat_sessions[session_id].append(final_ai_msg)
+                await websocket.send_json({"type": "answer", "content": final_response})
+
             chat_sessions[session_id] = current_messages
 
             await websocket.send_json({"type": "done"})
