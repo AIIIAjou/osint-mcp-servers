@@ -47,9 +47,20 @@ load_dotenv(os.path.join(current_dir, ".env"))
 INTELX_API_KEY = os.getenv("INTELX_API_KEY", "")
 VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
 SHODAN_API_KEY = os.getenv("SHODAN_API_KEY", "")
+GOOGLE_SAFE_BROWSING_API_KEY = os.getenv("GOOGLE_SAFE_BROWSING_API_KEY", "")
+URLSCAN_API_KEY = os.getenv("URLSCAN_API_KEY", "")
 
 # OSINT 도구 클래스 직접 구현 (server_stdio.py 의존성 제거)
 HAS_TOOLS = True
+
+# 추가 패키지 설치 확인
+try:
+    import whois
+    HAS_WHOIS = True
+except ImportError:
+    HAS_WHOIS = False
+    print("⚠️ whois 패키지가 설치되지 않았습니다. 도메인 분석 기능이 제한됩니다.")
+    print("   설치 명령어: pip install python-whois")
 
 class SherlockClient:
     """Sherlock 래퍼 (간소화 버전)"""
@@ -141,6 +152,242 @@ class VirusTotalClient:
                     stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
                     return {"ip": ip, "stats": stats}
                 return {"error": f"API Error: {response.status}"}
+
+
+class GoogleSafeBrowsingClient:
+    """Google Safe Browsing API 클라이언트"""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
+
+    async def check_url_threat(self, url: str) -> dict:
+        """URL의 안전성을 Google Safe Browsing으로 확인"""
+        if not self.api_key:
+            return {"error": "Google Safe Browsing API 키가 설정되지 않았습니다."}
+
+        import aiohttp
+        payload = {
+            "client": {
+                "clientId": "osint-dashboard",
+                "clientVersion": "1.0.0"
+            },
+            "threatInfo": {
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": url}]
+            }
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                params = {"key": self.api_key}
+                async with session.post(self.base_url, params=params, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return self._parse_safe_browsing_response(data, url)
+                    else:
+                        return {"error": f"Google Safe Browsing API 오류: {response.status}"}
+            except Exception as e:
+                return {"error": f"Safe Browsing 조회 실패: {str(e)}"}
+
+    def _parse_safe_browsing_response(self, data: dict, url: str) -> dict:
+        """Safe Browsing 응답 파싱"""
+        if "matches" in data and data["matches"]:
+            threats = []
+            for match in data["matches"]:
+                threats.append({
+                    "threat_type": match.get("threatType", "UNKNOWN"),
+                    "platform_type": match.get("platformType", "UNKNOWN"),
+                    "cache_duration": match.get("cacheDuration", "")
+                })
+
+            return {
+                "url": url,
+                "threat_level": "malicious",
+                "threat_detected": True,
+                "threats": threats,
+                "recommendation": "🚨 악성 사이트로 판정됨! 접근하지 마세요."
+            }
+        else:
+            return {
+                "url": url,
+                "threat_level": "safe",
+                "threat_detected": False,
+                "threats": [],
+                "recommendation": "✅ Google Safe Browsing에서 안전한 사이트로 확인됨."
+            }
+
+
+class SSLClient:
+    """SSL 인증서 분석 클라이언트"""
+
+    async def analyze_ssl_certificate(self, domain: str) -> dict:
+        """도메인의 SSL 인증서 분석"""
+        try:
+            import ssl
+            import socket
+            from datetime import datetime
+
+            # SSL 연결 시도
+            context = ssl.create_default_context()
+            conn = context.wrap_socket(socket.socket(socket.AF_INET), server_hostname=domain)
+
+            conn.settimeout(10)
+            conn.connect((domain, 443))
+
+            # 인증서 정보 가져오기
+            cert = conn.getpeercert()
+            conn.close()
+
+            # 인증서 유효성 검증
+            cert_valid = self._validate_certificate(cert, domain)
+
+            return {
+                "domain": domain,
+                "ssl_valid": cert_valid["valid"],
+                "issuer": cert.get("issuer", []),
+                "subject": cert.get("subject", []),
+                "valid_from": cert.get("notBefore", ""),
+                "valid_until": cert.get("notAfter", ""),
+                "serial_number": cert.get("serialNumber", ""),
+                "warnings": cert_valid["warnings"]
+            }
+
+        except ssl.SSLError as e:
+            return {
+                "domain": domain,
+                "ssl_valid": False,
+                "error": f"SSL 오류: {str(e)}",
+                "warnings": ["SSL 연결 실패 - 피싱 사이트 가능성 높음"]
+            }
+        except Exception as e:
+            return {
+                "domain": domain,
+                "ssl_valid": False,
+                "error": f"SSL 분석 실패: {str(e)}",
+                "warnings": ["SSL 인증서 확인 불가"]
+            }
+
+    def _validate_certificate(self, cert: dict, domain: str) -> dict:
+        """인증서 유효성 검증"""
+        warnings = []
+        from datetime import datetime
+
+        try:
+            # 유효 기간 확인
+            not_before = datetime.strptime(cert.get("notBefore", ""), "%b %d %H:%M:%S %Y %Z")
+            not_after = datetime.strptime(cert.get("notAfter", ""), "%b %d %H:%M:%S %Y %Z")
+            now = datetime.now()
+
+            if now < not_before:
+                warnings.append("인증서가 아직 유효하지 않음")
+            if now > not_after:
+                warnings.append("인증서가 만료됨")
+
+            # 도메인 일치 확인
+            subject_alt_names = []
+            for field in cert.get("subjectAltName", []):
+                if field[0] == "DNS":
+                    subject_alt_names.append(field[1])
+
+            if domain not in subject_alt_names:
+                common_name = ""
+                for item in cert.get("subject", []):
+                    if item[0][0] == "commonName":
+                        common_name = item[0][1]
+                        break
+
+                if domain != common_name:
+                    warnings.append("도메인이 인증서와 일치하지 않음")
+
+            # 발급자 확인
+            issuer_org = ""
+            for item in cert.get("issuer", []):
+                if item[0][0] == "organizationName":
+                    issuer_org = item[0][1]
+                    break
+
+            if not issuer_org:
+                warnings.append("인증서 발급자 정보 불명확")
+
+        except Exception as e:
+            warnings.append(f"인증서 검증 오류: {str(e)}")
+
+        return {
+            "valid": len(warnings) == 0,
+            "warnings": warnings
+        }
+
+
+class DomainAnalysisClient:
+    """도메인 분석 클라이언트"""
+
+    async def analyze_domain_age(self, domain: str) -> dict:
+        """도메인의 등록 일자 및 수명 분석"""
+        try:
+            import whois
+            from datetime import datetime, timedelta
+
+            # WHOIS 조회
+            w = whois.whois(domain)
+
+            result = {
+                "domain": domain,
+                "creation_date": None,
+                "expiration_date": None,
+                "registrar": w.registrar if hasattr(w, 'registrar') else None,
+                "domain_age_days": None,
+                "suspicious_indicators": []
+            }
+
+            # 생성일 분석
+            if hasattr(w, 'creation_date') and w.creation_date:
+                if isinstance(w.creation_date, list):
+                    creation_date = w.creation_date[0]
+                else:
+                    creation_date = w.creation_date
+
+                result["creation_date"] = creation_date.isoformat() if hasattr(creation_date, 'isoformat') else str(creation_date)
+
+                # 도메인 수명 계산
+                now = datetime.now()
+                if hasattr(creation_date, 'replace'):  # datetime 객체인 경우
+                    age = now - creation_date.replace(tzinfo=None)
+                    result["domain_age_days"] = age.days
+
+                    # 의심스러운 징후들
+                    if age.days < 30:
+                        result["suspicious_indicators"].append("매우 최근에 등록된 도메인 (< 30일)")
+                    elif age.days < 90:
+                        result["suspicious_indicators"].append("최근에 등록된 도메인 (< 90일)")
+
+            # 만료일 분석
+            if hasattr(w, 'expiration_date') and w.expiration_date:
+                if isinstance(w.expiration_date, list):
+                    expiration_date = w.expiration_date[0]
+                else:
+                    expiration_date = w.expiration_date
+
+                result["expiration_date"] = expiration_date.isoformat() if hasattr(expiration_date, 'isoformat') else str(expiration_date)
+
+                # 곧 만료되는 도메인
+                if hasattr(expiration_date, 'replace'):
+                    now = datetime.now()
+                    time_to_expiry = expiration_date.replace(tzinfo=None) - now
+                    if time_to_expiry.days < 30:
+                        result["suspicious_indicators"].append("곧 만료되는 도메인 (< 30일)")
+
+            return result
+
+        except Exception as e:
+            return {
+                "domain": domain,
+                "error": f"WHOIS 조회 실패: {str(e)}",
+                "suspicious_indicators": ["WHOIS 정보 조회 불가 - 의심스러운 도메인"]
+            }
+
 
 class PlaywrightClient:
     """Playwright 웹 분석 클라이언트 (강화 버전)"""
@@ -293,6 +540,127 @@ async def search_leaks(term: str) -> str:
     return json.dumps({"message": "Intelligence X 기능은 현재 API 키 설정이 필요합니다."}, ensure_ascii=False)
 
 @tool
+async def check_google_safe_browsing(url: str) -> str:
+    """
+    Google Safe Browsing API를 사용하여 URL이 악성 사이트인지 확인합니다.
+    피싱, 멀웨어, 원치 않는 소프트웨어 등을 탐지할 때 사용합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = GoogleSafeBrowsingClient(GOOGLE_SAFE_BROWSING_API_KEY)
+    result = await client.check_url_threat(url)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def analyze_ssl_certificate(domain: str) -> str:
+    """
+    도메인의 SSL 인증서 유효성을 분석합니다.
+    유효하지 않은 SSL 인증서는 피싱 사이트의 징후일 수 있습니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = SSLClient()
+    result = await client.analyze_ssl_certificate(domain)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def analyze_domain_age(domain: str) -> str:
+    """
+    도메인의 등록 일자, 만료일, 등록 기관 등을 분석합니다.
+    최근 등록된 도메인이나 이상한 등록 정보는 의심스러운 징후입니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    client = DomainAnalysisClient()
+    result = await client.analyze_domain_age(domain)
+    return json.dumps(result, ensure_ascii=False)
+
+@tool
+async def comprehensive_security_check(url: str) -> str:
+    """
+    URL에 대한 종합 보안 검사를 수행합니다.
+    VirusTotal, Google Safe Browsing, SSL 분석, 도메인 수명 분석을 모두 실행합니다.
+    """
+    if not HAS_TOOLS:
+        return "도구 모듈을 로드할 수 없어 실행할 수 없습니다."
+
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        if not domain:
+            domain = url.replace("https://", "").replace("http://", "").split("/")[0]
+
+        results = {}
+
+        # 1. VirusTotal 도메인 검사
+        vt_client = VirusTotalClient(VIRUSTOTAL_API_KEY)
+        vt_result = await vt_client.get_domain_report(domain)
+        results["virustotal"] = vt_result
+
+        # 2. Google Safe Browsing
+        gsb_client = GoogleSafeBrowsingClient(GOOGLE_SAFE_BROWSING_API_KEY)
+        gsb_result = await gsb_client.check_url_threat(url)
+        results["google_safe_browsing"] = gsb_result
+
+        # 3. SSL 인증서 분석
+        ssl_client = SSLClient()
+        ssl_result = await ssl_client.analyze_ssl_certificate(domain)
+        results["ssl_analysis"] = ssl_result
+
+        # 4. 도메인 수명 분석
+        domain_client = DomainAnalysisClient()
+        domain_result = await domain_client.analyze_domain_age(domain)
+        results["domain_analysis"] = domain_result
+
+        # 종합 판정
+        threat_levels = []
+        if "stats" in vt_result and vt_result["stats"]:
+            malicious = vt_result["stats"].get("malicious", 0)
+            suspicious = vt_result["stats"].get("suspicious", 0)
+            if malicious > 0:
+                threat_levels.append("malicious")
+            elif suspicious > 0:
+                threat_levels.append("suspicious")
+
+        if gsb_result.get("threat_detected"):
+            threat_levels.append("malicious")
+
+        if not ssl_result.get("ssl_valid"):
+            threat_levels.append("suspicious")
+
+        if domain_result.get("suspicious_indicators"):
+            threat_levels.append("suspicious")
+
+        # 최종 판정
+        if "malicious" in threat_levels:
+            final_threat_level = "malicious"
+        elif "suspicious" in threat_levels:
+            final_threat_level = "suspicious"
+        else:
+            final_threat_level = "safe"
+
+        results["comprehensive_analysis"] = {
+            "url": url,
+            "domain": domain,
+            "final_threat_level": final_threat_level,
+            "threat_indicators": threat_levels,
+            "recommendation": {
+                "malicious": "🚨 이 사이트는 악성으로 판정되었습니다. 절대 접근하지 마세요!",
+                "suspicious": "⚠️ 이 사이트는 의심스러운 징후가 있습니다. 주의해서 접근하세요.",
+                "safe": "✅ 이 사이트는 안전한 것으로 보입니다."
+            }.get(final_threat_level, "알 수 없음")
+        }
+
+        return json.dumps(results, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"error": f"종합 보안 검사 실패: {str(e)}"}, ensure_ascii=False)
+
+@tool
 async def search_local_db(query: str) -> str:
     """
     로컬 데이터베이스(db.csv)에 저장된 과거 수집 기록을 검색합니다.
@@ -318,6 +686,27 @@ async def search_local_db(query: str) -> str:
         return "데이터베이스에서 관련 기록을 찾을 수 없습니다."
 
     return json.dumps(results, ensure_ascii=False, indent=2)
+
+# 도구명과 의미 있는 수집 방법 매핑
+METHOD_MAPPINGS = {
+    "search_username": "사용자명 소셜 미디어 검색",
+    "check_domain_reputation": "도메인 보안 평판 확인",
+    "check_ip_reputation": "IP 주소 보안 평판 확인",
+    "analyze_webpage": "URL 유해성 검증",
+    "analyze_url_playwright": "URL 유해성 검증",
+    "search_leaks": "유출 정보 검색",
+    "search_local_db": "로컬 데이터베이스 검색",
+    "crawl_and_analyze_url": "웹사이트 전체 분석",
+    "auto_explore_webpage": "자동 웹 탐색",
+    "deep_analyze_urls": "재귀 URL 분석",
+    "interact_with_webpage": "웹페이지 상호작용 분석",
+    "check_virustotal_domain": "VirusTotal 도메인 검사",
+    "check_virustotal_ip": "VirusTotal IP 검사",
+    "check_google_safe_browsing": "Google 안전 브라우징 검사",
+    "analyze_ssl_certificate": "SSL 인증서 분석",
+    "analyze_domain_age": "도메인 수명 분석",
+    "comprehensive_security_check": "종합 보안 검사"
+}
 
 @tool
 async def save_to_db(
@@ -351,7 +740,9 @@ async def save_to_db(
     중요: summary는 발견된 모든 중요 정보를 포함하여 최대한 상세하게 작성해야 합니다.
     """
     try:
-        print(f"[DEBUG] save_to_db 호출됨 - target: {target}, method: {method}")
+        # 도구명을 의미 있는 수집 방법으로 변환
+        display_method = METHOD_MAPPINGS.get(method, method)
+        print(f"[DEBUG] save_to_db 호출됨 - target: {target}, method: {method} → {display_method}")
 
         sensitive_info = {}
         if emails:
@@ -374,7 +765,7 @@ async def save_to_db(
             pdf_path=pdf_path,
             summary=summary,
             sensitive_info=sensitive_info,
-            collection_method=method,
+            collection_method=display_method,
             threat_level=threat_level,
             metadata=metadata
         )
@@ -392,7 +783,7 @@ async def save_to_db(
         return f"❌ 저장 중 오류 발생: {str(e)}\n상세: {error_detail}"
 
 # 사용 가능한 도구 목록
-tools = [search_username, check_domain_reputation, check_ip_reputation, analyze_webpage, search_leaks, search_local_db, save_to_db]
+tools = [search_username, check_domain_reputation, check_ip_reputation, analyze_webpage, search_leaks, search_local_db, check_google_safe_browsing, analyze_ssl_certificate, analyze_domain_age, comprehensive_security_check, save_to_db]
 
 
 
@@ -1203,12 +1594,22 @@ async def root():
                 <input type="text" id="search-target" placeholder="타겟 검색...">
                 <select id="filter-method">
                     <option value="">모든 수집 방법</option>
-                    <option value="analyze_url_playwright">URL 분석</option>
-                    <option value="crawl_and_analyze_url">URL 크롤링</option>
-                    <option value="check_virustotal_domain">VirusTotal 도메인</option>
-                    <option value="check_virustotal_ip">VirusTotal IP</option>
-                    <option value="search_intelligence_x">Intelligence X</option>
-                    <option value="search_username_sherlock">Sherlock</option>
+                    <option value="URL 유해성 검증">URL 유해성 검증</option>
+                    <option value="웹사이트 전체 분석">웹사이트 전체 분석</option>
+                    <option value="VirusTotal 도메인 검사">VirusTotal 도메인 검사</option>
+                    <option value="VirusTotal IP 검사">VirusTotal IP 검사</option>
+                    <option value="유출 정보 검색">유출 정보 검색</option>
+                    <option value="사용자명 소셜 미디어 검색">사용자명 소셜 미디어 검색</option>
+                    <option value="도메인 보안 평판 확인">도메인 보안 평판 확인</option>
+                    <option value="IP 주소 보안 평판 확인">IP 주소 보안 평판 확인</option>
+                    <option value="자동 웹 탐색">자동 웹 탐색</option>
+                    <option value="재귀 URL 분석">재귀 URL 분석</option>
+                    <option value="웹페이지 상호작용 분석">웹페이지 상호작용 분석</option>
+                    <option value="로컬 데이터베이스 검색">로컬 데이터베이스 검색</option>
+                    <option value="Google 안전 브라우징 검사">Google 안전 브라우징 검사</option>
+                    <option value="SSL 인증서 분석">SSL 인증서 분석</option>
+                    <option value="도메인 수명 분석">도메인 수명 분석</option>
+                    <option value="종합 보안 검사">종합 보안 검사</option>
                 </select>
                 <select id="filter-threat">
                     <option value="">모든 위협 수준</option>
@@ -1980,12 +2381,20 @@ async def chat_endpoint(request: ChatRequest):
 
 ## 2. 자동 OSINT 조사 워크플로우
 1. search_local_db로 과거 기록 확인
-2. 타겟 유형에 맞는 도구 실행 (search_username, check_domain_reputation, analyze_webpage 등)
-3. 발견된 URL들에 대해 analyze_webpage 실행 (PDF 자동 생성)
-4. 모든 결과를 **상세한 summary**와 함께 save_to_db로 저장
+2. 타겟 유형에 맞는 도구 실행:
+   - **사용자명**: search_username
+   - **도메인/URL**: comprehensive_security_check (종합 보안 검사) 실행 후 세부 분석
+   - **IP 주소**: check_ip_reputation
+3. 의심스러운 사이트 발견 시 추가 분석:
+   - comprehensive_security_check: VirusTotal + Google Safe Browsing + SSL + 도메인 분석
+   - analyze_ssl_certificate: SSL 인증서 유효성 확인
+   - analyze_domain_age: 도메인 등록 정보 분석
+4. 발견된 URL들에 대해 analyze_webpage 실행 (PDF 자동 생성)
+5. 모든 결과를 **상세한 summary**와 함께 save_to_db로 저장
    - summary는 최소 3-5문장으로 발견된 모든 중요 정보 포함
    - 이메일, 전화번호, 소셜미디어 링크 모두 전달
-5. 마크다운 형식으로 구조화된 보고서 제시
+   - 보안 위협 수준 명확히 표시 (safe/suspicious/malicious)
+6. 마크다운 형식으로 구조화된 보고서 제시
 
 ## 3. 중요 원칙
 ✅ DO: 자동으로 여러 도구 연쇄 실행, 상세한 summary 작성, PDF 생성, 마크다운 보고서
