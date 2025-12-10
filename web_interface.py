@@ -437,13 +437,12 @@ async def root():
 
         html, body {
             height: 100vh;
-            overflow: hidden;
+            overflow: auto;
         }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
             display: flex;
             flex-direction: column;
         }
@@ -452,11 +451,12 @@ async def root():
             max-width: 1400px;
             margin: 0 auto;
             width: 100%;
-            height: 100%;
+            min-height: 100vh;
+            padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 20px;
-            overflow: hidden;
+            overflow: visible;
         }
 
         .header {
@@ -586,8 +586,16 @@ async def root():
             flex: 1;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
+            overflow: visible;
             min-height: 0;
+        }
+
+        #records-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
         }
 
         .records h2 {
@@ -600,10 +608,32 @@ async def root():
         .records-table-wrapper {
             width: 100%;
             flex: 1;
+            min-height: 0;
             overflow-y: auto;
-            overflow-x: hidden;
+            overflow-x: auto;
             border: 1px solid #e0e0e0;
             border-radius: 8px;
+            scrollbar-width: thin;
+            scrollbar-color: #667eea #f0f0f0;
+        }
+
+        .records-table-wrapper::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .records-table-wrapper::-webkit-scrollbar-track {
+            background: #f0f0f0;
+            border-radius: 4px;
+        }
+
+        .records-table-wrapper::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 4px;
+        }
+
+        .records-table-wrapper::-webkit-scrollbar-thumb:hover {
+            background: #5568d3;
         }
 
         .records-table {
@@ -803,11 +833,8 @@ async def root():
         }
 
         @media (max-width: 768px) {
-            body {
-                padding: 10px;
-            }
-
             .container {
+                padding: 10px;
                 gap: 10px;
             }
 
